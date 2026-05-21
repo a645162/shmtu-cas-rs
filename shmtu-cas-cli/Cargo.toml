@@ -1,0 +1,11 @@
+[package]
+name = "shmtu-cas-cli"
+version = "0.1.0"
+edition = "2021"
+description = "上海海事大学CAS登录与账单查询命令行工具"
+
+[dependencies]
+shmtu-cas = { path = "../shmtu-cas" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"

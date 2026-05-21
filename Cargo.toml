@@ -1,0 +1,3 @@
+[workspace]
+members = ["shmtu-cas", "shmtu-cas-cli"]
+resolver = "2"
