@@ -1,4 +1,5 @@
 pub mod epay;
+pub mod wechat;
 
 use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode, redirect};

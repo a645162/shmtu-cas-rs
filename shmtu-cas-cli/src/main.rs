@@ -31,7 +31,7 @@ enum Commands {
         #[arg(long, env = "SHMTU_USER_ID")]
         user_id: Option<String>,
 
-        #[arg(short, long, env = "SHMTU_PASSWORD")]
+        #[arg(short, long, env = "SHMTU_PASSWORD", hide_env_values = true)]
         password: String,
 
         /// 验证码模式: ocr(自动识别) 或 manual(手动输入)
@@ -71,6 +71,28 @@ enum Commands {
 
         #[arg(short, long)]
         output: Option<String>,
+    },
+    /// 登录微信平台并获取宿舍热水状态
+    HotWater {
+        #[arg(short, long, env = "SHMTU_USERNAME")]
+        username: String,
+
+        /// 用户名(学号)，优先于 --username
+        #[arg(long, env = "SHMTU_USER_ID")]
+        user_id: Option<String>,
+
+        #[arg(short, long, env = "SHMTU_PASSWORD", hide_env_values = true)]
+        password: String,
+
+        /// 验证码模式: ocr(自动识别) 或 manual(手动输入)
+        #[arg(short, long, default_value = "ocr")]
+        captcha: CaptchaMode,
+
+        #[arg(long, env = "SHMTU_OCR_HOST", default_value = "127.0.0.1")]
+        ocr_host: String,
+
+        #[arg(long, env = "SHMTU_OCR_PORT", default_value_t = 21601)]
+        ocr_port: u16,
     },
 }
 
@@ -259,6 +281,98 @@ async fn main() -> Result<()> {
             if let Some(path) = output {
                 export_csv(&path, &bill_list)?;
                 println!("已导出到 {}", path);
+            }
+        }
+
+        Commands::HotWater {
+            username,
+            user_id,
+            password,
+            captcha: captcha_mode,
+            ocr_host,
+            ocr_port,
+        } => {
+            let username = user_id.as_deref().unwrap_or(&username);
+            let mut wechat = cas::wechat::WechatAuth::new()?;
+            let ocr = captcha::CaptchaOcr::new(&ocr_host, ocr_port);
+
+            println!("正在探测登录状态...");
+            match wechat.probe_login().await? {
+                cas::wechat::LoginProbe::AlreadyLoggedIn => {
+                    println!("已经登录");
+                }
+                cas::wechat::LoginProbe::NeedLogin { ticket_url } => {
+                    let max_retries = 5;
+                    for attempt in 1..=max_retries {
+                        println!("第{}/{}次登录尝试", attempt, max_retries);
+
+                        let challenge = wechat.prepare_challenge(&ticket_url).await?;
+                        println!("验证码大小: {} bytes", challenge.captcha_image.len());
+
+                        let validate_code = match captcha_mode {
+                            CaptchaMode::Ocr => {
+                                let ocr_result = ocr.ocr_auto_retry(&challenge.captcha_image, 3)?;
+                                println!("OCR识别结果: {}", ocr_result);
+                                captcha::get_expr_result(&ocr_result)
+                            }
+                            CaptchaMode::Manual => {
+                                std::fs::write("captcha.png", &challenge.captcha_image)?;
+                                println!("验证码已保存到 captcha.png，请查看后输入答案");
+                                print!("请输入验证码答案: ");
+                                io::stdout().flush()?;
+                                let mut input = String::new();
+                                io::stdin().read_line(&mut input)?;
+                                input.trim().to_string()
+                            }
+                        };
+                        println!("验证码答案: {}", validate_code);
+
+                        match wechat
+                            .submit_login(&username, &password, &validate_code, &challenge.execution)
+                            .await?
+                        {
+                            cas::wechat::LoginSubmitResult::Success => {
+                                if wechat.test_login_status().await? {
+                                    println!("登录验证成功！");
+                                    break;
+                                }
+                                bail!("登录验证失败");
+                            }
+                            cas::wechat::LoginSubmitResult::ValidateCodeError => {
+                                println!("验证码错误，重试中...");
+                                continue;
+                            }
+                            cas::wechat::LoginSubmitResult::PasswordError => {
+                                bail!("用户名或密码错误");
+                            }
+                            cas::wechat::LoginSubmitResult::Failure(msg) => {
+                                bail!("登录失败: {}", msg);
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!("正在获取热水信息...");
+            let html = wechat.get_hot_water().await?;
+            let list = parser::hot_water::parse_hot_water_list(&html)?;
+
+            if list.is_empty() {
+                if html.contains("Fatal error") || html.contains("404 Not Found") || html.contains("Exception") {
+                    eprintln!("\n[服务器错误] SHMTU 热水接口返回错误页（与本程序无关）:");
+                    eprintln!("{}", html.chars().take(500).collect::<String>());
+                } else {
+                    println!("没有找到热水信息（可能 HTML 结构变化或宿舍楼信息为空）");
+                }
+                return Ok(());
+            }
+
+            println!("共{}栋楼", list.len());
+            for info in &list {
+                println!(
+                    "{}号楼: 温度 {:.1}℃, 水位 {:.0}%",
+                    info.building, info.temperature, info.water_level
+                );
             }
         }
     }

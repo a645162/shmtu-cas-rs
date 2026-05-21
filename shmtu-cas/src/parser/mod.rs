@@ -1,4 +1,5 @@
 pub mod export;
+pub mod hot_water;
 
 use anyhow::Result;
 use chrono::NaiveDateTime;
