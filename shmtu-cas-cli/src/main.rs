@@ -1,9 +1,17 @@
+use std::collections::HashSet;
 use std::io::{self, Write};
+use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use shmtu_cas::{captcha, cas, parser};
-use cas::epay::{EpayAuth, LoginProbe, LoginSubmitResult};
+use shmtu_cas::captcha::{
+    self, CaptchaAnswer, CaptchaOcr, CaptchaResolver, ManualCaptchaResolver, OcrCaptchaResolver,
+};
+use shmtu_cas::cas::epay::{EpayAuth, LoginProbe, LoginSubmitResult};
+use shmtu_cas::cas::{self, wechat};
+use shmtu_cas::datatype::bill::{BillItem, BillType};
+use shmtu_cas::parser;
+use shmtu_cas::sync::{self, BillStore, SyncOptions};
 
 #[derive(Clone, ValueEnum)]
 enum CaptchaMode {
@@ -11,6 +19,25 @@ enum CaptchaMode {
     Ocr,
     /// 手动输入验证码
     Manual,
+}
+
+#[derive(Clone, ValueEnum)]
+enum BillTabArg {
+    All,
+    Success,
+    WaitFor,
+    Failure,
+}
+
+impl From<BillTabArg> for BillType {
+    fn from(value: BillTabArg) -> Self {
+        match value {
+            BillTabArg::All => BillType::All,
+            BillTabArg::Success => BillType::Success,
+            BillTabArg::WaitFor => BillType::NotPaid,
+            BillTabArg::Failure => BillType::Failure,
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -48,13 +75,50 @@ enum Commands {
         output: Option<String>,
 
         #[arg(long, default_value = "all")]
-        tab: String,
+        tab: BillTabArg,
 
         #[arg(long, default_value_t = 1)]
         page: u32,
 
         #[arg(long, default_value_t = false)]
         all_pages: bool,
+    },
+    /// 增量同步账单（仅拉取新增条目）
+    Sync {
+        #[arg(short, long, env = "SHMTU_USERNAME")]
+        username: String,
+
+        /// 用户名(学号)，优先于 --username
+        #[arg(long, env = "SHMTU_USER_ID")]
+        user_id: Option<String>,
+
+        #[arg(short, long, env = "SHMTU_PASSWORD", hide_env_values = true)]
+        password: String,
+
+        /// 验证码模式: ocr(自动识别) 或 manual(手动输入)
+        #[arg(short, long, default_value = "ocr")]
+        captcha: CaptchaMode,
+
+        #[arg(long, env = "SHMTU_OCR_HOST", default_value = "127.0.0.1")]
+        ocr_host: String,
+
+        #[arg(long, env = "SHMTU_OCR_PORT", default_value_t = 21601)]
+        ocr_port: u16,
+
+        /// 本地 JSON 存档路径（默认 bills.json）
+        #[arg(short, long, default_value = "bills.json")]
+        store: String,
+
+        #[arg(long, default_value = "all")]
+        tab: BillTabArg,
+
+        /// 连续遇到多少条已知条目后早停
+        #[arg(long, default_value_t = 5)]
+        early_stop: u32,
+
+        /// 最大翻页数
+        #[arg(long, default_value_t = 100)]
+        max_pages: u32,
     },
     /// 测试验证码OCR
     CaptchaTest {
@@ -96,8 +160,127 @@ enum Commands {
     },
 }
 
-fn export_csv(path: &str, bills: &[parser::BillItem]) -> Result<()> {
+fn export_csv(path: &str, bills: &[BillItem]) -> Result<()> {
     parser::export::CsvExporter::new().export(path, bills)
+}
+
+/// 根据 CLI 模式构造对应的 CaptchaResolver。
+fn build_resolver(mode: &CaptchaMode, ocr_host: &str, ocr_port: u16) -> Arc<dyn CaptchaResolver> {
+    match mode {
+        CaptchaMode::Ocr => Arc::new(OcrCaptchaResolver::new(ocr_host, ocr_port)),
+        CaptchaMode::Manual => Arc::new(ManualCaptchaResolver::new(Box::new(|image: &[u8]| {
+            let owned = image.to_vec();
+            Box::pin(async move {
+                std::fs::write("captcha.png", &owned)?;
+                println!("验证码已保存到 captcha.png，请查看后输入答案");
+                print!("请输入验证码答案: ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                Ok(CaptchaAnswer::answer(input.trim().to_string()))
+            })
+        }))),
+    }
+}
+
+/// 基于 JSON 文件的简单 BillStore 实现（CLI 示例用）。
+struct JsonBillStore {
+    path: String,
+    bills: Vec<BillItem>,
+    known_numbers: HashSet<String>,
+}
+
+impl JsonBillStore {
+    fn load(path: &str) -> Result<Self> {
+        let bills = if std::path::Path::new(path).exists() {
+            let data = std::fs::read_to_string(path)
+                .context("读取本地账单文件失败")?;
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let known_numbers: HashSet<String> = bills.iter().map(|b: &BillItem| b.number.clone()).collect();
+
+        Ok(Self {
+            path: path.to_string(),
+            bills,
+            known_numbers,
+        })
+    }
+
+    fn save(&self) -> Result<()> {
+        let json = serde_json::to_string_pretty(&self.bills)?;
+        std::fs::write(&self.path, json)?;
+        Ok(())
+    }
+}
+
+impl BillStore for JsonBillStore {
+    fn contains(&self, number: &str) -> bool {
+        self.known_numbers.contains(number)
+    }
+
+    fn merge(&mut self, new_bills: Vec<BillItem>) {
+        for bill in new_bills {
+            if !self.known_numbers.contains(&bill.number) {
+                self.known_numbers.insert(bill.number.clone());
+                self.bills.push(bill);
+            }
+        }
+    }
+}
+
+/// 通用登录流程：探测 → 重试循环。返回已登录的 EpayAuth。
+async fn do_login(
+    epay: &mut EpayAuth,
+    username: &str,
+    password: &str,
+    resolver: &Arc<dyn CaptchaResolver>,
+) -> Result<()> {
+    println!("正在探测登录状态...");
+    match epay.probe_login().await? {
+        LoginProbe::AlreadyLoggedIn => {
+            println!("已经登录");
+        }
+        LoginProbe::NeedLogin { .. } => {
+            let max_retries = 5;
+            for attempt in 1..=max_retries {
+                println!("第{}/{}次登录尝试", attempt, max_retries);
+
+                let challenge = epay.prepare_challenge().await?;
+                println!("验证码大小: {} bytes", challenge.captcha_image.len());
+
+                let answer = resolver.resolve(&challenge.captcha_image).await?;
+                let validate_code = answer.into_final_answer();
+                println!("验证码答案: {}", validate_code);
+
+                match epay
+                    .submit_login(username, password, &validate_code, &challenge.execution)
+                    .await?
+                {
+                    LoginSubmitResult::Success => {
+                        if epay.test_login_status().await? {
+                            println!("登录验证成功！");
+                            break;
+                        }
+                        bail!("登录验证失败");
+                    }
+                    LoginSubmitResult::ValidateCodeError => {
+                        println!("验证码错误，重试中...");
+                        continue;
+                    }
+                    LoginSubmitResult::PasswordError => {
+                        bail!("用户名或密码错误");
+                    }
+                    LoginSubmitResult::Failure(msg) => {
+                        bail!("登录失败: {}", msg);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -119,85 +302,22 @@ async fn main() -> Result<()> {
         } => {
             let username = user_id.as_deref().unwrap_or(&username);
             let mut epay = EpayAuth::new()?;
-            let ocr = captcha::CaptchaOcr::new(&ocr_host, ocr_port);
-
-            println!("正在探测登录状态...");
-            match epay.probe_login().await? {
-                LoginProbe::AlreadyLoggedIn => {
-                    println!("已经登录");
-                }
-                LoginProbe::NeedLogin { .. } => {
-                    let max_retries = 5;
-                    for attempt in 1..=max_retries {
-                        println!("第{}/{}次登录尝试", attempt, max_retries);
-
-                        let challenge = epay.prepare_challenge().await?;
-                        println!("验证码大小: {} bytes", challenge.captcha_image.len());
-
-                        let validate_code = match captcha_mode {
-                            CaptchaMode::Ocr => {
-                                let ocr_result = ocr.ocr_auto_retry(&challenge.captcha_image, 3)?;
-                                println!("OCR识别结果: {}", ocr_result);
-                                captcha::get_expr_result(&ocr_result)
-                            }
-                            CaptchaMode::Manual => {
-                                std::fs::write("captcha.png", &challenge.captcha_image)?;
-                                println!("验证码已保存到 captcha.png，请查看后输入答案");
-                                print!("请输入验证码答案: ");
-                                io::stdout().flush()?;
-                                let mut input = String::new();
-                                io::stdin().read_line(&mut input)?;
-                                input.trim().to_string()
-                            }
-                        };
-                        println!("验证码答案: {}", validate_code);
-
-                        match epay
-                            .submit_login(&username, &password, &validate_code, &challenge.execution)
-                            .await?
-                        {
-                            LoginSubmitResult::Success => {
-                                if epay.test_login_status().await? {
-                                    println!("登录验证成功！");
-                                    break;
-                                }
-                                bail!("登录验证失败");
-                            }
-                            LoginSubmitResult::ValidateCodeError => {
-                                println!("验证码错误，重试中...");
-                                continue;
-                            }
-                            LoginSubmitResult::PasswordError => {
-                                bail!("用户名或密码错误");
-                            }
-                            LoginSubmitResult::Failure(msg) => {
-                                bail!("登录失败: {}", msg);
-                            }
-                        }
-                    }
-                }
-            }
+            let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port);
+            do_login(&mut epay, username, &password, &resolver).await?;
 
             println!("正在获取账单...");
 
-            let tab_no = match tab.as_str() {
-                "all" => "1",
-                "success" => "2",
-                "waitfor" => "3",
-                "failure" => "4",
-                _ => "1",
-            };
+            let bill_type: BillType = tab.into();
+            let tab_no = bill_type.tab_no();
 
             let mut all_bills = Vec::new();
             let mut current_page = page;
 
             loop {
                 let html = epay.get_bill(current_page, tab_no).await?;
+                let page_result = parser::parse_bill_page(&html)?;
 
-                let bill_list = parser::parse_bill_list(&html)?;
-                let total_pages = parser::get_total_pages(&html)?;
-
-                if bill_list.is_empty() && current_page == page {
+                if page_result.bills.is_empty() && current_page == page {
                     println!("没有找到账单记录");
                     return Ok(());
                 }
@@ -205,11 +325,12 @@ async fn main() -> Result<()> {
                 println!(
                     "第{}/{}页: 找到{}条记录",
                     current_page,
-                    total_pages,
-                    bill_list.len()
+                    page_result.total_pages,
+                    page_result.bills.len()
                 );
 
-                all_bills.extend(bill_list);
+                let total_pages = page_result.total_pages;
+                all_bills.extend(page_result.bills);
 
                 if !all_pages || current_page >= total_pages {
                     break;
@@ -226,7 +347,7 @@ async fn main() -> Result<()> {
                     bill.item_type,
                     bill.target_user,
                     bill.money_str,
-                    bill.status
+                    bill.status_str
                 );
             }
 
@@ -236,8 +357,62 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Sync {
+            username,
+            user_id,
+            password,
+            captcha: captcha_mode,
+            ocr_host,
+            ocr_port,
+            store: store_path,
+            tab,
+            early_stop,
+            max_pages,
+        } => {
+            let username = user_id.as_deref().unwrap_or(&username);
+            let mut epay = EpayAuth::new()?;
+            let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port);
+            do_login(&mut epay, username, &password, &resolver).await?;
+
+            println!("正在增量同步账单...");
+            let mut store = JsonBillStore::load(&store_path)?;
+            println!("本地已有 {} 条记录", store.bills.len());
+
+            let options = SyncOptions {
+                bill_type: tab.into(),
+                early_stop_threshold: early_stop,
+                max_pages,
+                ..Default::default()
+            };
+
+            let result = sync::incremental_sync(&epay, &mut store, &options).await?;
+
+            println!(
+                "同步完成: 新增 {} 条, 翻页 {}, {}",
+                result.new_count,
+                result.pages_fetched,
+                if result.early_stopped { "早停" } else { "正常结束" }
+            );
+
+            for bill in &result.new_bills {
+                println!(
+                    "{} | {} | {} | {} | {}",
+                    bill.date_time_formatted,
+                    bill.item_type,
+                    bill.target_user,
+                    bill.money_str,
+                    bill.status_str
+                );
+            }
+
+            if result.new_count > 0 {
+                store.save()?;
+                println!("已保存到 {}", store_path);
+            }
+        }
+
         Commands::CaptchaTest { ocr_host, ocr_port } => {
-            let ocr = captcha::CaptchaOcr::new(&ocr_host, ocr_port);
+            let ocr = CaptchaOcr::new(&ocr_host, ocr_port);
 
             println!("正在获取验证码...");
             let client = cas::create_client()?;
@@ -274,7 +449,7 @@ async fn main() -> Result<()> {
                     bill.item_type,
                     bill.target_user,
                     bill.money_str,
-                    bill.status
+                    bill.status_str
                 );
             }
 
@@ -293,59 +468,45 @@ async fn main() -> Result<()> {
             ocr_port,
         } => {
             let username = user_id.as_deref().unwrap_or(&username);
-            let mut wechat = cas::wechat::WechatAuth::new()?;
-            let ocr = captcha::CaptchaOcr::new(&ocr_host, ocr_port);
+            let mut wx = wechat::WechatAuth::new()?;
+            let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port);
 
             println!("正在探测登录状态...");
-            match wechat.probe_login().await? {
-                cas::wechat::LoginProbe::AlreadyLoggedIn => {
+            match wx.probe_login().await? {
+                wechat::LoginProbe::AlreadyLoggedIn => {
                     println!("已经登录");
                 }
-                cas::wechat::LoginProbe::NeedLogin { ticket_url } => {
+                wechat::LoginProbe::NeedLogin { ticket_url } => {
                     let max_retries = 5;
                     for attempt in 1..=max_retries {
                         println!("第{}/{}次登录尝试", attempt, max_retries);
 
-                        let challenge = wechat.prepare_challenge(&ticket_url).await?;
+                        let challenge = wx.prepare_challenge(&ticket_url).await?;
                         println!("验证码大小: {} bytes", challenge.captcha_image.len());
 
-                        let validate_code = match captcha_mode {
-                            CaptchaMode::Ocr => {
-                                let ocr_result = ocr.ocr_auto_retry(&challenge.captcha_image, 3)?;
-                                println!("OCR识别结果: {}", ocr_result);
-                                captcha::get_expr_result(&ocr_result)
-                            }
-                            CaptchaMode::Manual => {
-                                std::fs::write("captcha.png", &challenge.captcha_image)?;
-                                println!("验证码已保存到 captcha.png，请查看后输入答案");
-                                print!("请输入验证码答案: ");
-                                io::stdout().flush()?;
-                                let mut input = String::new();
-                                io::stdin().read_line(&mut input)?;
-                                input.trim().to_string()
-                            }
-                        };
+                        let answer = resolver.resolve(&challenge.captcha_image).await?;
+                        let validate_code = answer.into_final_answer();
                         println!("验证码答案: {}", validate_code);
 
-                        match wechat
-                            .submit_login(&username, &password, &validate_code, &challenge.execution)
+                        match wx
+                            .submit_login(username, &password, &validate_code, &challenge.execution)
                             .await?
                         {
-                            cas::wechat::LoginSubmitResult::Success => {
-                                if wechat.test_login_status().await? {
+                            wechat::LoginSubmitResult::Success => {
+                                if wx.test_login_status().await? {
                                     println!("登录验证成功！");
                                     break;
                                 }
                                 bail!("登录验证失败");
                             }
-                            cas::wechat::LoginSubmitResult::ValidateCodeError => {
+                            wechat::LoginSubmitResult::ValidateCodeError => {
                                 println!("验证码错误，重试中...");
                                 continue;
                             }
-                            cas::wechat::LoginSubmitResult::PasswordError => {
+                            wechat::LoginSubmitResult::PasswordError => {
                                 bail!("用户名或密码错误");
                             }
-                            cas::wechat::LoginSubmitResult::Failure(msg) => {
+                            wechat::LoginSubmitResult::Failure(msg) => {
                                 bail!("登录失败: {}", msg);
                             }
                         }
@@ -354,11 +515,14 @@ async fn main() -> Result<()> {
             }
 
             println!("正在获取热水信息...");
-            let html = wechat.get_hot_water().await?;
+            let html = wx.get_hot_water().await?;
             let list = parser::hot_water::parse_hot_water_list(&html)?;
 
             if list.is_empty() {
-                if html.contains("Fatal error") || html.contains("404 Not Found") || html.contains("Exception") {
+                if html.contains("Fatal error")
+                    || html.contains("404 Not Found")
+                    || html.contains("Exception")
+                {
                     eprintln!("\n[服务器错误] SHMTU 热水接口返回错误页（与本程序无关）:");
                     eprintln!("{}", html.chars().take(500).collect::<String>());
                 } else {

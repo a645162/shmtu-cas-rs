@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use csv::Writer;
 use std::fs::File;
 
-use super::BillItem;
+use crate::datatype::bill::BillItem;
 
 const DEFAULT_HEADERS: &[&str] = &[
     "日期",
