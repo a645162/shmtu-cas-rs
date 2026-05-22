@@ -1,0 +1,13 @@
+[package]
+name = "shmtu-ocr-cli"
+version.workspace = true
+edition.workspace = true
+description = "上海海事大学CAS验证码OCR命令行测试工具"
+
+[dependencies]
+shmtu-ocr = { path = "../shmtu-ocr" }
+shmtu-cas = { path = "../../Core/shmtu-cas" }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+reqwest = { version = "0.12", features = ["blocking"] }

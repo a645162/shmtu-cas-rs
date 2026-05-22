@@ -1,0 +1,11 @@
+[package]
+name = "shmtu-ocr"
+version.workspace = true
+edition.workspace = true
+description = "上海海事大学CAS验证码OCR识别库（ONNX推理）"
+
+[dependencies]
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+ndarray = "0.17"
+image = "0.25"
+anyhow = "1"
