@@ -1,7 +1,8 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use image::DynamicImage;
 use ort::session::Session;
 use ort::value::Tensor;
+use std::path::{Path, PathBuf};
 
 use crate::const_value;
 
@@ -13,35 +14,55 @@ pub struct CasOnnxBackend {
 }
 
 impl CasOnnxBackend {
+    fn model_paths(dir: &Path) -> [(&'static str, PathBuf); 3] {
+        [
+            (
+                const_value::MODEL_ONNX_EQUAL_FP32,
+                dir.join(const_value::MODEL_ONNX_EQUAL_FP32),
+            ),
+            (
+                const_value::MODEL_ONNX_OPERATOR_FP32,
+                dir.join(const_value::MODEL_ONNX_OPERATOR_FP32),
+            ),
+            (
+                const_value::MODEL_ONNX_DIGIT_FP32,
+                dir.join(const_value::MODEL_ONNX_DIGIT_FP32),
+            ),
+        ]
+    }
+
     /// 检查模型文件是否都存在。
-    pub fn check_model_exists(dir: &str) -> bool {
-        std::path::Path::new(&format!("{}/{}", dir, const_value::MODEL_ONNX_EQUAL_FP32)).exists()
-            && std::path::Path::new(&format!("{}/{}", dir, const_value::MODEL_ONNX_OPERATOR_FP32))
-                .exists()
-            && std::path::Path::new(&format!("{}/{}", dir, const_value::MODEL_ONNX_DIGIT_FP32))
-                .exists()
+    pub fn check_model_exists(dir: impl AsRef<Path>) -> bool {
+        Self::missing_model_files(dir).is_empty()
+    }
+
+    /// 列出缺失的模型文件名。
+    pub fn missing_model_files(dir: impl AsRef<Path>) -> Vec<&'static str> {
+        Self::model_paths(dir.as_ref())
+            .into_iter()
+            .filter_map(|(name, path)| (!path.exists()).then_some(name))
+            .collect()
     }
 
     /// 从目录加载三个 ONNX 模型。
-    pub fn load(dir: &str) -> Result<Self> {
-        let equal_path = format!("{}/{}", dir, const_value::MODEL_ONNX_EQUAL_FP32);
-        let operator_path = format!("{}/{}", dir, const_value::MODEL_ONNX_OPERATOR_FP32);
-        let digit_path = format!("{}/{}", dir, const_value::MODEL_ONNX_DIGIT_FP32);
+    pub fn load(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let [(_, equal_path), (_, operator_path), (_, digit_path)] = Self::model_paths(dir);
 
         let session_equal_symbol = Session::builder()
             .context("创建 ONNX session builder 失败")?
             .commit_from_file(&equal_path)
-            .with_context(|| format!("加载等号模型失败: {}", equal_path))?;
+            .with_context(|| format!("加载等号模型失败: {}", equal_path.display()))?;
 
         let session_operator = Session::builder()
             .context("创建 ONNX session builder 失败")?
             .commit_from_file(&operator_path)
-            .with_context(|| format!("加载运算符模型失败: {}", operator_path))?;
+            .with_context(|| format!("加载运算符模型失败: {}", operator_path.display()))?;
 
         let session_digit = Session::builder()
             .context("创建 ONNX session builder 失败")?
             .commit_from_file(&digit_path)
-            .with_context(|| format!("加载数字模型失败: {}", digit_path))?;
+            .with_context(|| format!("加载数字模型失败: {}", digit_path.display()))?;
 
         Ok(Self {
             session_equal_symbol,
@@ -77,6 +98,10 @@ impl CasOnnxBackend {
 
     /// 对验证码图片执行完整识别流程。对齐 C# 的 PredictValidateCode。
     pub fn predict_validate_code(&mut self, img: &DynamicImage) -> Result<crate::OcrResult> {
+        if img.width() == 0 || img.height() == 0 {
+            bail!("输入图片为空");
+        }
+
         // 1. 二值化 + 通道重映射
         let binary = crate::image::image_utils::convert_to_binary(img, 200);
         let remapped = crate::image::image_utils::revert_color(&binary);
@@ -97,18 +122,11 @@ impl CasOnnxBackend {
         };
 
         // 4. 裁切 digit1 / operator / digit2
-        let digit1_img =
-            crate::image::captcha_image::split_by_ratio(&remapped, 0.0, key_points[0]);
-        let operator_img = crate::image::captcha_image::split_by_ratio(
-            &remapped,
-            key_points[0],
-            key_points[1],
-        );
-        let digit2_img = crate::image::captcha_image::split_by_ratio(
-            &remapped,
-            key_points[1],
-            key_points[2],
-        );
+        let digit1_img = crate::image::captcha_image::split_by_ratio(&remapped, 0.0, key_points[0]);
+        let operator_img =
+            crate::image::captcha_image::split_by_ratio(&remapped, key_points[0], key_points[1]);
+        let digit2_img =
+            crate::image::captcha_image::split_by_ratio(&remapped, key_points[1], key_points[2]);
 
         // 5. 推理
         let digit1 = Self::predict_resnet(&mut self.session_digit, &digit1_img)?;
@@ -141,8 +159,9 @@ impl CasOnnxBackend {
     }
 
     /// 从文件路径识别验证码。
-    pub fn predict_file(&mut self, path: &str) -> Result<crate::OcrResult> {
-        let img = image::open(path).with_context(|| format!("打开图片失败: {}", path))?;
+    pub fn predict_file(&mut self, path: impl AsRef<Path>) -> Result<crate::OcrResult> {
+        let path = path.as_ref();
+        let img = image::open(path).with_context(|| format!("打开图片失败: {}", path.display()))?;
         self.predict_validate_code(&img)
     }
 
