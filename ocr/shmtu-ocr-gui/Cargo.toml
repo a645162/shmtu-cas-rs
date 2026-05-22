@@ -1,0 +1,13 @@
+[package]
+name = "shmtu-ocr-gui"
+version = "0.1.0"
+edition = "2021"
+description = "上海海事大学CAS验证码OCR图形界面（egui）"
+
+[dependencies]
+anyhow = "1"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+image = "0.25"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+rfd = "0.16"
+shmtu-ocr = { path = "../shmtu-ocr" }

@@ -4,6 +4,7 @@ members = [
     "Core/shmtu-cas-cli",
     "ocr/shmtu-ocr",
     "ocr/shmtu-ocr-cli",
+    "ocr/shmtu-ocr-gui",
 ]
 resolver = "2"
 
