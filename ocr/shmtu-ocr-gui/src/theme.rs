@@ -4,17 +4,30 @@ use eframe::egui::{
 use std::fs;
 use std::sync::Arc;
 
-pub(crate) fn configure_visuals(ctx: &egui::Context) {
+pub(crate) fn configure_visuals(ctx: &egui::Context, dark_mode: bool) {
     configure_fonts(ctx);
 
-    let mut visuals = egui::Visuals::light();
-    visuals.override_text_color = Some(Color32::from_rgb(34, 46, 58));
-    visuals.widgets.active.bg_fill = accent_color();
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(226, 236, 248);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(246, 248, 251);
-    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(246, 248, 251);
-    visuals.selection.bg_fill = accent_color();
-    visuals.window_fill = Color32::from_rgb(250, 251, 253);
+    let visuals = if dark_mode {
+        let mut v = egui::Visuals::dark();
+        v.override_text_color = Some(Color32::from_rgb(210, 216, 227));
+        v.widgets.active.bg_fill = accent_color(true);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(42, 48, 62);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(37, 40, 48);
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(37, 40, 48);
+        v.selection.bg_fill = accent_color(true);
+        v.window_fill = Color32::from_rgb(24, 27, 34);
+        v
+    } else {
+        let mut v = egui::Visuals::light();
+        v.override_text_color = Some(Color32::from_rgb(34, 46, 58));
+        v.widgets.active.bg_fill = accent_color(false);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(226, 236, 248);
+        v.widgets.inactive.bg_fill = Color32::from_rgb(246, 248, 251);
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(246, 248, 251);
+        v.selection.bg_fill = accent_color(false);
+        v.window_fill = Color32::from_rgb(250, 251, 253);
+        v
+    };
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
@@ -70,9 +83,145 @@ fn load_cjk_font() -> Option<(String, Vec<u8>)> {
     None
 }
 
-pub(crate) fn accent_color() -> Color32 {
-    Color32::from_rgb(26, 118, 210)
+// --- Semantic color helpers (theme-aware) ---
+
+pub(crate) fn accent_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(82, 158, 247)
+    } else {
+        Color32::from_rgb(26, 118, 210)
+    }
 }
+
+pub(crate) fn card_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(37, 40, 48)
+    } else {
+        Color32::from_rgb(247, 249, 252)
+    }
+}
+
+pub(crate) fn card_stroke(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(54, 58, 69)
+    } else {
+        Color32::from_rgb(218, 225, 232)
+    }
+}
+
+pub(crate) fn surface_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(28, 31, 38)
+    } else {
+        Color32::WHITE
+    }
+}
+
+pub(crate) fn surface_stroke(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(46, 50, 64)
+    } else {
+        Color32::from_rgb(221, 227, 235)
+    }
+}
+
+pub(crate) fn dim_text(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(139, 147, 165)
+    } else {
+        Color32::from_rgb(100, 112, 126)
+    }
+}
+
+pub(crate) fn panel_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(28, 31, 38)
+    } else {
+        Color32::from_rgb(248, 250, 252)
+    }
+}
+
+pub(crate) fn central_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(24, 27, 34)
+    } else {
+        Color32::from_rgb(250, 251, 253)
+    }
+}
+
+pub(crate) fn model_panel_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(26, 35, 52)
+    } else {
+        Color32::from_rgb(232, 240, 250)
+    }
+}
+
+pub(crate) fn model_panel_stroke(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(40, 52, 72)
+    } else {
+        Color32::from_rgb(197, 213, 232)
+    }
+}
+
+pub(crate) fn status_bar_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(30, 33, 40)
+    } else {
+        Color32::from_rgb(244, 246, 248)
+    }
+}
+
+pub(crate) fn status_bar_stroke(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(50, 55, 65)
+    } else {
+        Color32::from_rgb(220, 226, 233)
+    }
+}
+
+pub(crate) fn batch_item_bg(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(32, 36, 46)
+    } else {
+        Color32::from_rgb(241, 245, 249)
+    }
+}
+
+pub(crate) fn batch_item_stroke(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(50, 55, 65)
+    } else {
+        Color32::from_rgb(220, 226, 233)
+    }
+}
+
+pub(crate) fn success_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(76, 175, 122)
+    } else {
+        Color32::from_rgb(53, 114, 72)
+    }
+}
+
+pub(crate) fn warning_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(218, 155, 45)
+    } else {
+        Color32::from_rgb(145, 84, 25)
+    }
+}
+
+pub(crate) fn error_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(224, 85, 85)
+    } else {
+        Color32::from_rgb(170, 52, 47)
+    }
+}
+
+// --- Reusable UI components ---
 
 pub(crate) fn pill(ui: &mut egui::Ui, text: &str, fill: Color32) {
     Frame::new()
@@ -90,10 +239,10 @@ pub(crate) fn section_divider(ui: &mut egui::Ui) {
     ui.add_space(4.0);
 }
 
-pub(crate) fn status_color(status: &str) -> Color32 {
+pub(crate) fn status_color(status: &str, dark_mode: bool) -> Color32 {
     match status {
-        "完成" => Color32::from_rgb(53, 114, 72),
-        "失败" => Color32::from_rgb(170, 52, 47),
-        _ => Color32::from_rgb(120, 130, 141),
+        "完成" => success_color(dark_mode),
+        "失败" => error_color(dark_mode),
+        _ => dim_text(dark_mode),
     }
 }

@@ -45,7 +45,8 @@ pub(super) struct CaptchaItem {
 
 impl OcrGuiApp {
     pub(crate) fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        configure_visuals(&cc.egui_ctx);
+        let dark_mode = cc.egui_ctx.style().visuals.dark_mode;
+        configure_visuals(&cc.egui_ctx, dark_mode);
 
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
