@@ -33,16 +33,7 @@ pub fn parse_bill_item(row: ElementRef<'_>) -> Option<BillItem> {
         .map(|dt| dt.and_utc().timestamp())
         .unwrap_or(0);
 
-    let deal_divs: Vec<_> = tds[1].select(&div_selector).collect();
-    let (item_type, number) = if deal_divs.len() >= 2 {
-        (
-            extract_text(&deal_divs[0]),
-            only_digits(&extract_text(&deal_divs[1])),
-        )
-    } else {
-        let text = extract_text(&tds[1]);
-        (text, String::new())
-    };
+    let (item_type, number) = parse_deal_cell(&tds[1], &div_selector);
 
     let target_user = extract_text(&tds[2]);
     let money_str = extract_text(&tds[3]);
@@ -82,6 +73,20 @@ fn extract_text(element: &ElementRef<'_>) -> String {
     element.text().collect::<String>().trim().to_string()
 }
 
+fn parse_deal_cell(cell: &ElementRef<'_>, div_selector: &Selector) -> (String, String) {
+    let deal_divs: Vec<_> = cell.select(div_selector).collect();
+    if deal_divs.len() >= 2 {
+        let item_type = compact_whitespace(&extract_text(&deal_divs[0]));
+        let number = only_digits(&extract_text(&deal_divs[1]));
+        if !item_type.is_empty() && !number.is_empty() {
+            return (item_type, number);
+        }
+    }
+
+    let text = compact_whitespace(&extract_text(cell));
+    split_item_type_and_number(&text)
+}
+
 fn format_time(time_str: &str) -> String {
     let digits: String = time_str.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() == 6 {
@@ -94,6 +99,20 @@ fn format_time(time_str: &str) -> String {
 fn only_digits(s: &str) -> String {
     let re = Regex::new(r"\d+").unwrap();
     re.find_iter(s).map(|m| m.as_str()).collect()
+}
+
+fn compact_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn split_item_type_and_number(text: &str) -> (String, String) {
+    if let Some(idx) = text.find("交易号") {
+        let item_type = text[..idx].trim().trim_end_matches([':', '：']).trim().to_string();
+        let number = only_digits(&text[idx..]);
+        return (item_type, number);
+    }
+
+    (text.trim().to_string(), String::new())
 }
 
 #[cfg(test)]
@@ -111,5 +130,13 @@ mod tests {
     fn test_only_digits() {
         assert_eq!(only_digits("交易号: 202401010001"), "202401010001");
         assert_eq!(only_digits("abc123def456"), "123456");
+    }
+
+    #[test]
+    fn test_split_item_type_and_number() {
+        let (item_type, number) =
+            split_item_type_and_number("水控消费 交易号：20260521135336290726");
+        assert_eq!(item_type, "水控消费");
+        assert_eq!(number, "20260521135336290726");
     }
 }

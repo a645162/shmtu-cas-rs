@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashSet;
 use crate::cas::epay::EpayAuth;
 use crate::datatype::bill::{BillItem, BillType};
 
@@ -57,6 +58,7 @@ pub async fn incremental_sync(
     let mut pages_fetched = 0u32;
     let mut consecutive_known = 0u32;
     let mut early_stopped = false;
+    let mut seen_numbers = HashSet::new();
 
     for page_offset in 0..options.max_pages {
         let page_no = options.start_page + page_offset;
@@ -70,7 +72,9 @@ pub async fn incremental_sync(
         pages_fetched += 1;
 
         for bill in page_result.bills {
-            if store.contains(&bill.number) {
+            let is_known = !bill.number.is_empty()
+                && (store.contains(&bill.number) || !seen_numbers.insert(bill.number.clone()));
+            if is_known {
                 consecutive_known += 1;
                 if consecutive_known >= options.early_stop_threshold {
                     early_stopped = true;
