@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use crate::cas::epay::EpayAuth;
 use crate::datatype::bill::{BillItem, BillType};
 
+pub type SyncPageProgressCallback = dyn Fn(SyncPageProgress) + Send + Sync;
+
 /// 调用方提供的数据存储抽象。库不关心底层是 JSON / SQLite / 内存。
 pub trait BillStore: Send + Sync {
     /// 判断某条交易号是否已存在于本地
@@ -47,12 +49,35 @@ pub struct SyncResult {
     pub new_bills: Vec<BillItem>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SyncPageProgress {
+    /// 当前已拉取到的页面编号
+    pub page: u32,
+    /// 账单总页数
+    pub total_pages: u32,
+    /// 当前账号截至本页累计发现的新账单数
+    pub new_count: usize,
+}
+
 /// 增量同步：逐页拉取账单，用交易号去重，遇到连续 N 条已知条目则早停。
 pub async fn incremental_sync(
     epay: &EpayAuth,
     store: &mut dyn BillStore,
     options: &SyncOptions,
 ) -> Result<SyncResult> {
+    incremental_sync_with_progress::<SyncPageProgressCallback>(epay, store, options, None).await
+}
+
+/// 带页级进度回调的增量同步。
+pub async fn incremental_sync_with_progress<F>(
+    epay: &EpayAuth,
+    store: &mut dyn BillStore,
+    options: &SyncOptions,
+    progress_callback: Option<&F>,
+) -> Result<SyncResult>
+where
+    F: Fn(SyncPageProgress) + Send + Sync + ?Sized,
+{
     let tab_no = options.bill_type.tab_no();
     let mut new_bills = Vec::new();
     let mut pages_fetched = 0u32;
@@ -84,6 +109,14 @@ pub async fn incremental_sync(
                 consecutive_known = 0;
                 new_bills.push(bill);
             }
+        }
+
+        if let Some(cb) = progress_callback {
+            cb(SyncPageProgress {
+                page: page_no,
+                total_pages: page_result.total_pages.max(page_no),
+                new_count: new_bills.len(),
+            });
         }
 
         if early_stopped {
