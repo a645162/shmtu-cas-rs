@@ -24,6 +24,8 @@ pub struct SyncOptions {
     pub bill_type: BillType,
     /// 连续遇到多少条已存在的交易号就早停
     pub early_stop_threshold: u32,
+    /// 仅同步该时间戳（秒）之后的账单；None 表示不限时间范围
+    pub since_timestamp: Option<i64>,
 }
 
 impl Default for SyncOptions {
@@ -33,6 +35,7 @@ impl Default for SyncOptions {
             max_pages: 100,
             bill_type: BillType::All,
             early_stop_threshold: 5,
+            since_timestamp: None,
         }
     }
 }
@@ -83,6 +86,7 @@ where
     let mut pages_fetched = 0u32;
     let mut consecutive_known = 0u32;
     let mut early_stopped = false;
+    let mut reached_time_boundary = false;
     let mut seen_numbers = HashSet::new();
 
     for page_offset in 0..options.max_pages {
@@ -97,6 +101,12 @@ where
         pages_fetched += 1;
 
         for bill in page_result.bills {
+            if let Some(since_timestamp) = options.since_timestamp {
+                if bill.timestamp < since_timestamp {
+                    reached_time_boundary = true;
+                    break;
+                }
+            }
             let is_known = !bill.number.is_empty()
                 && (store.contains(&bill.number) || !seen_numbers.insert(bill.number.clone()));
             if is_known {
@@ -120,6 +130,10 @@ where
         }
 
         if early_stopped {
+            break;
+        }
+
+        if reached_time_boundary {
             break;
         }
 
