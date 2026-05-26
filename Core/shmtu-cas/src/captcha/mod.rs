@@ -1,12 +1,16 @@
 pub mod expr_resolver;
 pub mod manual_resolver;
 pub mod ocr;
+pub mod ocr_http;
+pub mod ocr_http_resolver;
 pub mod ocr_resolver;
 pub mod resolver;
 
 pub use expr_resolver::ExprCaptchaResolver;
 pub use manual_resolver::ManualCaptchaResolver;
 pub use ocr::CaptchaOcr;
+pub use ocr_http::CaptchaOcrHttp;
+pub use ocr_http_resolver::OcrHttpCaptchaResolver;
 pub use ocr_resolver::OcrCaptchaResolver;
 pub use resolver::{CaptchaAnswer, CaptchaAnswerKind, CaptchaResolver, ResolveFuture};
 

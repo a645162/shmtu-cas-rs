@@ -5,7 +5,7 @@ edition = "2021"
 description = "上海海事大学CAS登录与账单查询库"
 
 [dependencies]
-reqwest = { version = "0.12", features = ["cookies"] }
+reqwest = { version = "0.12", features = ["cookies", "json", "blocking"] }
 scraper = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1"
@@ -15,3 +15,4 @@ tokio = { version = "1", features = ["rt", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+base64 = "0.22"
