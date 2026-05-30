@@ -5,6 +5,7 @@ members = [
     "ocr/shmtu-ocr",
     "ocr/shmtu-ocr-cli",
     "ocr/shmtu-ocr-gui",
+    "ocr/shmtu-ocr-server",
 ]
 resolver = "2"
 

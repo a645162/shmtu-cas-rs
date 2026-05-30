@@ -1,0 +1,35 @@
+services:
+  shmtu-ocr-server:
+    build:
+      context: ../../../
+      dockerfile: ocr/shmtu-ocr-server/Dockerfile
+    ports:
+      - "21600:21600"
+      - "21601:21601"
+    volumes:
+      - ./models:/app/models
+    command: ["shmtu-ocr-server", "--model-dir", "/app/models", "--enable-tcp"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:21600/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # GPU variant — uncomment to use with NVIDIA runtime
+  # shmtu-ocr-server-gpu:
+  #   build:
+  #     context: ../../../
+  #     dockerfile: ocr/shmtu-ocr-server/Dockerfile
+  #   ports:
+  #     - "21600:21600"
+  #     - "21601:21601"
+  #   volumes:
+  #     - ./models:/app/models
+  #   command: ["shmtu-ocr-server", "--model-dir", "/app/models", "--enable-tcp", "--gpu"]
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
