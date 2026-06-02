@@ -7,6 +7,9 @@ on:
       - master
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
   pages: write
@@ -24,17 +27,21 @@ jobs:
         working-directory: Documents
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: Documents/package-lock.json
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+      - name: Enable GitHub Pages if admin token is provided
+        if: ${{ secrets.PAGES_ADMIN_TOKEN != '' }}
+        uses: actions/configure-pages@v6
+        with:
+          token: ${{ secrets.PAGES_ADMIN_TOKEN }}
+          enablement: true
 
       - name: Install dependencies
         run: npm ci
@@ -43,7 +50,7 @@ jobs:
         run: npm run docs:build
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: Documents/docs/.vitepress/dist
 
