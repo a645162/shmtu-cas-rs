@@ -1,6 +1,6 @@
 # `shmtu-cas` API 总览
 
-`src/lib.rs` 当前导出以下模块：
+`shmtu-cas` 是整个工作区的核心业务库，通过 `src/lib.rs` 导出六个模块：
 
 ```rust
 pub mod captcha;
@@ -11,107 +11,68 @@ pub mod parser;
 pub mod sync;
 ```
 
-这说明它的 API 设计是“按职责分模块暴露”，而不是只给一个大而杂的 facade。
+每个模块的职责边界和完整 API 参考见子页面：
 
-## 模块职责
+- [CAS 与登录流程](/shmtu-cas/cas-and-login) — `cas` 模块
+- [验证码抽象](/shmtu-cas/captcha) — `captcha` 模块
+- [解析器与数据模型](/shmtu-cas/parser-and-data) — `datatype` + `parser` + `classifier` 模块
+- [同步设计](/shmtu-cas/sync) — `sync` 模块
 
-## `cas`
+## 快速索引
 
-职责：
-
-- 创建 HTTP client
-- 获取 `execution`
-- 执行 CAS 登录
-- 跟随重定向
-- 封装 `EpayAuth` / `WechatAuth`
-
-适合宿主在“访问远端系统”这一层使用。
-
-## `captcha`
-
-职责：
-
-- 下载验证码图片
-- 提供 `CaptchaResolver` 抽象
-- 定义 `CaptchaAnswer` 与 `CaptchaAnswerKind`
-- 封装远程 TCP/HTTP OCR 与手动解析器
-
-适合宿主在“验证码求解策略”这一层使用。
-
-## `datatype`
-
-职责：
-
-- 定义账单数据结构与类型枚举
-- 提供合并、金额求和、字段导出能力
-
-适合在持久化层和展示层之间做统一数据交换。
-
-## `parser`
-
-职责：
-
-- 解析 HTML 页面
-- 提取页数
-- 提取账单项
-- 导出 CSV
-
-适合在“原始 HTML -> 结构化数据”的边界使用。
-
-## `classifier`
-
-职责：
-
-- `BillClassifier`：交易类别判定
-- `PositionTranslator`：对方账户到楼栋/房间的映射
-
-适合做补充标签，不适合作为核心真值来源。
-
-## `sync`
-
-职责：
-
-- 定义 `BillStore`
-- 定义 `SyncOptions`
-- 提供带进度回调的增量同步
-
-这是宿主二次封装时最重要的入口。
+| 想做什么 | 用什么 | 在哪 |
+|---------|--------|------|
+| 创建 HTTP 客户端 | `cas::create_client()` | cas |
+| 获取 CAS execution 令牌 | `cas::get_execution()` | cas |
+| 提交 CAS 登录 | `cas::cas_login()` | cas |
+| 跟随重定向 | `cas::cas_redirect()` | cas |
+| 消费侧登录与账单 | `cas::epay::EpayAuth` | cas |
+| 热水侧登录与查询 | `cas::wechat::WechatAuth` | cas |
+| 下载验证码图片 | `captcha::fetch_captcha()` | captcha |
+| 算式求值 | `captcha::get_expr_result()` | captcha |
+| 验证码解析器 trait | `captcha::CaptchaResolver` | captcha |
+| 手动验证码 | `captcha::ManualCaptchaResolver` | captcha |
+| 远程 TCP OCR | `captcha::OcrCaptchaResolver` | captcha |
+| 远程 HTTP OCR | `captcha::OcrHttpCaptchaResolver` | captcha |
+| 账单数据结构 | `datatype::bill::BillItem` | datatype |
+| 账单类型枚举 | `datatype::bill::BillType` | datatype |
+| 账单状态枚举 | `datatype::bill::BillItemStatus` | datatype |
+| 解析账单 HTML | `parser::parse_bill_page()` | parser |
+| 导出 CSV | `parser::export::CsvExporter` | parser |
+| 解析热水信息 | `parser::hot_water::parse_hot_water_list()` | parser |
+| 账单分类 | `classifier::BillClassifier` | classifier |
+| 位置翻译 | `classifier::PositionTranslator` | classifier |
+| 增量同步 | `sync::incremental_sync()` | sync |
+| 带进度的增量同步 | `sync::incremental_sync_with_progress()` | sync |
 
 ## 推荐接入方式
+
+最简接入：创建 `EpayAuth`，选择一种 `CaptchaResolver`，调用 `incremental_sync`。
 
 ```rust
 use anyhow::Result;
 use shmtu_cas::cas::epay::{EpayAuth, LoginProbe, LoginSubmitResult};
+use shmtu_cas::captcha::OcrHttpCaptchaResolver;
 use shmtu_cas::sync::{incremental_sync, BillStore, SyncOptions};
+use shmtu_cas::datatype::bill::BillItem;
 
 struct MyStore;
 
 impl BillStore for MyStore {
-    fn contains(&self, number: &str) -> bool {
-        let _ = number;
-        false
-    }
-
-    fn merge(&mut self, new_bills: Vec<shmtu_cas::datatype::bill::BillItem>) {
-        let _ = new_bills;
-    }
+    fn contains(&self, number: &str) -> bool { false }
+    fn merge(&mut self, new_bills: Vec<BillItem>) { /* 保存 */ }
 }
 
 async fn run_sync() -> Result<()> {
     let mut epay = EpayAuth::new()?;
+
     match epay.probe_login().await? {
         LoginProbe::AlreadyLoggedIn => {}
         LoginProbe::NeedLogin { .. } => {
             let challenge = epay.prepare_challenge().await?;
-            let captcha = String::from_utf8_lossy(&challenge.captcha_image);
-            let _ = captcha;
-            let result = epay
-                .submit_login("username", "password", "1234", &challenge.execution)
-                .await?;
-            match result {
-                LoginSubmitResult::Success => {}
-                _ => anyhow::bail!("login failed"),
-            }
+            let resolver = OcrHttpCaptchaResolver::new("http://127.0.0.1:5000");
+            let answer = resolver.resolve(&challenge.captcha_image).await?.into_final_answer();
+            epay.submit_login("student_id", "password", &answer, &challenge.execution).await?;
         }
     }
 
@@ -121,17 +82,25 @@ async fn run_sync() -> Result<()> {
 }
 ```
 
-上面示例只表达接入顺序，不表达真实验证码求解方式。
-
 ## API 设计特点
 
-- 以 trait 隔离宿主依赖
-- 以结构体参数承载同步策略
+- 以 trait 隔离宿主依赖（`BillStore`、`CaptchaResolver`）
+- 以结构体参数承载同步策略（`SyncOptions`）
 - 以模块边界区分网络、解析、分类、同步
-- 以 `Result<T>` 暴露错误，而不是吞掉失败原因
+- 以 `Result<T>` 暴露错误，不吞掉失败原因
+- 以枚举化结果（`LoginProbe`、`LoginSubmitResult`）便于宿主做 UI 分支
 
-## 配图占位
+## 模块依赖关系
 
-### API 模块关系图
+```
+captcha ──┐
+          ├── cas ── sync ── (BillStore)
+datatype ─┤              │
+parser ───┘              └── parser
+classifier ──────────────── (可选，宿主层调用)
+```
 
-![API 模块关系图占位](/images/screenshots/api/api-module-map.png)
+- `sync` 依赖 `cas`（获取 HTML）和 `parser`（解析 HTML）
+- `cas` 依赖 `captcha`（获取验证码图片）
+- `datatype` 被所有模块共享
+- `classifier` 独立使用，不在同步主链路中
