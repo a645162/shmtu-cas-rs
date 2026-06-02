@@ -4,6 +4,8 @@ use shmtu_cas::captcha;
 use shmtu_cas::cas;
 use shmtu_ocr::backend::CasOnnxBackend;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -88,6 +90,21 @@ fn load_backend(model_dir: &Path) -> Result<CasOnnxBackend> {
     CasOnnxBackend::load(model_dir).context("加载 ONNX 模型失败")
 }
 
+fn compute_sha256(path: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("打开文件失败: {}", path.display()))?;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn download_model(model_dir: &Path) -> Result<()> {
     use shmtu_ocr::const_value;
 
@@ -101,6 +118,37 @@ fn download_model(model_dir: &Path) -> Result<()> {
 
     let client = reqwest::blocking::Client::new();
 
+    // 获取校验文件
+    let checksums: HashMap<String, String> = match client
+        .get(const_value::MODEL_ONNX_CHECKSUM_URL)
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let text = resp.text().unwrap_or_default();
+            text.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(2, "  ").collect();
+                    if parts.len() == 2 {
+                        Some((parts[1].trim().to_string(), parts[0].trim().to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Ok(resp) => {
+            eprintln!(
+                "警告: 获取校验文件失败 (HTTP {})，跳过完整性验证",
+                resp.status()
+            );
+            HashMap::new()
+        }
+        Err(e) => {
+            eprintln!("警告: 获取校验文件失败 ({})，跳过完整性验证", e);
+            HashMap::new()
+        }
+    };
+
     for file in &files {
         let dest = model_dir.join(file);
         if dest.exists() {
@@ -108,18 +156,47 @@ fn download_model(model_dir: &Path) -> Result<()> {
             continue;
         }
 
-        let url = format!("{}/{}", const_value::MODEL_ONNX_BASE_URL, file);
-        println!("下载 {} ...", url);
+        let max_attempts = 3;
+        for attempt in 1..=max_attempts {
+            let url = format!("{}/{}", const_value::MODEL_ONNX_BASE_URL, file);
+            if attempt > 1 {
+                println!("重试下载 {} (第 {}/{} 次)...", file, attempt, max_attempts);
+            } else {
+                println!("下载 {} ...", url);
+            }
 
-        let mut resp = client.get(&url).send().context("HTTP GET 失败")?;
-        if !resp.status().is_success() {
-            bail!("下载 {} 失败: HTTP {}", file, resp.status());
+            let mut resp = client.get(&url).send().context("HTTP GET 失败")?;
+            if !resp.status().is_success() {
+                bail!("下载 {} 失败: HTTP {}", file, resp.status());
+            }
+
+            let mut out = std::fs::File::create(&dest)
+                .with_context(|| format!("创建模型文件失败: {}", dest.display()))?;
+            resp.copy_to(&mut out)?;
+            drop(out);
+
+            // 校验 SHA256
+            if let Some(expected) = checksums.get(*file) {
+                let actual = compute_sha256(&dest)?;
+                if actual == *expected {
+                    println!("{} 下载完成 (校验通过)", file);
+                } else {
+                    eprintln!(
+                        "警告: {} 校验失败 (期望: {}，实际: {})，删除并重试",
+                        file, expected, actual
+                    );
+                    std::fs::remove_file(&dest)?;
+                    if attempt == max_attempts {
+                        bail!("{} 校验失败，已重试 {} 次仍不通过", file, max_attempts);
+                    }
+                    continue;
+                }
+            } else {
+                println!("{} 下载完成 (无校验信息)", file);
+            }
+
+            break; // 下载成功
         }
-
-        let mut out = std::fs::File::create(&dest)
-            .with_context(|| format!("创建模型文件失败: {}", dest.display()))?;
-        resp.copy_to(&mut out)?;
-        println!("{} 下载完成", file);
     }
 
     println!("所有模型下载完成 → {}", model_dir.display());

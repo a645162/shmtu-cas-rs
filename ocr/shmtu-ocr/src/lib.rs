@@ -9,6 +9,8 @@ pub mod const_value {
 
     pub const MODEL_ONNX_BASE_URL: &str =
         "https://gitee.com/a645162/shmtu-cas-ocr-model/releases/download/v1.0-ONNX";
+    pub const MODEL_ONNX_CHECKSUM_URL: &str =
+        "https://gitee.com/a645162/shmtu-cas-ocr-model/releases/download/v1.0-ONNX/SHA256SUMS.txt";
 }
 
 /// 等号类型。对齐 C# 的 CasExprEqualSymbol。

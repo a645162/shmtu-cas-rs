@@ -4,69 +4,80 @@ layout: home
 hero:
   name: shmtu-cas-rs
   text: 开发者文档
-  tagline: 面向维护者与集成方的架构说明、crate 划分、同步设计与 lib API 设计文档
+  tagline: 上海海事大学校园认证与账单同步的 Rust 组件库
   actions:
     - theme: brand
-      text: 快速开始
-      link: /getting-started
-    - theme: alt
       text: API 总览
       link: /shmtu-cas/api-overview
     - theme: alt
       text: 同步设计
       link: /shmtu-cas/sync
+    - theme: alt
+      text: 接入示例
+      link: /examples/integration
 
 features:
-  - title: 先讲边界，再讲实现
-    details: 把网络抓取、验证码求解、HTML 解析、同步算法、OCR 推理拆成清晰层次，便于维护和二次封装。
-  - title: 面向集成方
-    details: 重点解释 shmtu-cas 如何通过 BillStore、SyncOptions、CaptchaResolver 与宿主程序解耦。
-  - title: 覆盖 lib API 设计
-    details: 文档不只列模块名，也解释为什么 API 长这样、扩展点在哪里、适合宿主在哪一层二次封装。
-  - title: 预留技术截图
-    details: 已为架构图、时序图、OCR 示例、服务接口截图预留统一静态资源目录。
+  - title: CAS 登录
+    details: EpayAuth 封装探测、挑战、提交、会话恢复全流程，WechatAuth 支持热水侧认证
+  - title: 验证码抽象
+    details: CaptchaResolver trait 统一手动、远程 TCP/HTTP OCR、本地 ONNX 四种模式，切换无需改主流程
+  - title: 增量同步
+    details: BillStore trait 解耦存储，SyncOptions 控制策略，连续已知早停 + 时间边界 + 页级进度回调
+  - title: 解析与分类
+    details: HTML 解析、BillItem 数据模型、BillClassifier 分类、PositionTranslator 位置翻译、CSV 导出
 ---
 
-## 文档范围
+## 这套库做什么
 
-`shmtu-cas-rs` 是围绕上海海事大学校园认证、账单抓取与验证码识别建立的一组 Rust 组件。它不是单一 crate，而是一个工作区，包含：
+shmtu-cas-rs 帮你完成三件事：
 
-- `shmtu-cas`：CAS 登录、账单抓取、HTML 解析、分类与同步抽象
-- `shmtu-ocr`：本地 ONNX 验证码识别库
-- `shmtu-ocr-server`：OCR HTTP/TCP 服务
-- `shmtu-cas-cli` / `shmtu-ocr-cli` / `shmtu-ocr-gui`：调试与测试入口
+1. **登录** — 探测会话状态，获取验证码，提交 CAS 认证
+2. **同步** — 逐页拉取消费账单，增量去重，把新数据交还给你的存储层
+3. **识别** — 本地 ONNX 或远程服务识别验证码算式
 
-这套文档面向开发者，重点说明：
+你只需要实现 `BillStore` 的两个方法（`contains` 和 `merge`），就能接入整个同步链路。
 
-- 工作区如何划分
-- 各 crate 的职责边界
-- `lib` 的 API 设计思路
-- 同步流程如何和宿主程序对接
-- OCR 组件如何独立部署或嵌入
+## 最快的上手路径
 
-## 阅读顺序
+```rust
+use shmtu_cas::cas::epay::{EpayAuth, LoginProbe};
+use shmtu_cas::captcha::OcrHttpCaptchaResolver;
+use shmtu_cas::sync::{incremental_sync, BillStore, SyncOptions};
 
-- 想先把文档站跑起来：看 [快速开始](/getting-started)
-- 想理解模块关系：看 [整体架构](/architecture)
-- 想对接 `shmtu-cas`：看 [API 总览](/shmtu-cas/api-overview)
-- 想理解增量同步：看 [同步设计](/shmtu-cas/sync)
-- 想集成本地 OCR：看 [shmtu-ocr](/shmtu-ocr/onnx)
+// 实现 BillStore（决定数据怎么存）
+struct MyStore;
+impl BillStore for MyStore {
+    fn contains(&self, number: &str) -> bool { /* 查重 */ }
+    fn merge(&mut self, new_bills: Vec<BillItem>) { /* 存储 */ }
+}
 
-## 截图占位目录
+// 登录 + 同步
+let mut epay = EpayAuth::new()?;
+if let LoginProbe::NeedLogin { .. } = epay.probe_login().await? {
+    let challenge = epay.prepare_challenge().await?;
+    let answer = OcrHttpCaptchaResolver::new("http://127.0.0.1:5000")
+        .resolve(&challenge.captcha_image).await?.into_final_answer();
+    epay.submit_login("学号", "密码", &answer, &challenge.execution).await?;
+}
+incremental_sync(&epay, &mut MyStore::default(), &SyncOptions::default()).await?;
+```
 
-开发者文档截图占位已放到：
+## 模块一览
 
-- `src-tauri/vendor/shmtu-cas-rs/Documents/docs/public/images/screenshots/`
+| 模块 | 职责 |
+|------|------|
+| [`cas`](/shmtu-cas/cas-and-login) | CAS 登录、EpayAuth、WechatAuth |
+| [`captcha`](/shmtu-cas/captcha) | 验证码下载、CaptchaResolver、四种实现 |
+| [`datatype`](/shmtu-cas/parser-and-data) | BillItem、BillType、BillItemStatus |
+| [`parser`](/shmtu-cas/parser-and-data) | HTML 解析、CSV 导出、热水信息解析 |
+| [`classifier`](/shmtu-cas/parser-and-data) | 账单分类、位置翻译 |
+| [`sync`](/shmtu-cas/sync) | BillStore、SyncOptions、增量同步 |
 
-当前已预留：
+## 工作区成员
 
-- `architecture/`
-- `api/`
-- `sync/`
-- `ocr/`
-- `server/`
-- `integration/`
-
-## 非目标
-
-本文档不负责解释 Tauri 桌面程序如何使用，那部分内容已经拆分到主仓库的用户文档站中。
+| crate | 用途 |
+|-------|------|
+| `shmtu-cas` | 核心：登录 + 同步 + 解析 + 分类 |
+| `shmtu-ocr` | 本地 ONNX 验证码识别 |
+| `shmtu-ocr-server` | OCR HTTP/TCP 远程服务 |
+| `shmtu-cas-cli` | 命令行调试工具 |

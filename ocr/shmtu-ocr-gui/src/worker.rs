@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::time::Instant;
 
 pub(crate) enum WorkerCommand {
@@ -240,6 +242,21 @@ fn send_event(event_tx: &Sender<WorkerEvent>, event: WorkerEvent) {
     let _ = event_tx.send(event);
 }
 
+fn compute_sha256(path: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let mut file = File::open(path)
+        .with_context(|| format!("打开文件失败: {}", path.display()))?;
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn download_models<F>(model_dir: &Path, mut progress_cb: F) -> Result<()>
 where
     F: FnMut(f32),
@@ -256,6 +273,27 @@ where
     let client = Client::new();
     let per_file_progress = 100.0 / files.len() as f32;
 
+    // 获取校验文件
+    let checksums: HashMap<String, String> = match client
+        .get(const_value::MODEL_ONNX_CHECKSUM_URL)
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let text = resp.text().unwrap_or_default();
+            text.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.splitn(2, "  ").collect();
+                    if parts.len() == 2 {
+                        Some((parts[1].trim().to_string(), parts[0].trim().to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        _ => HashMap::new(),
+    };
+
     for (index, file_name) in files.iter().enumerate() {
         let start_progress = index as f32 * per_file_progress;
         let dest_path = model_dir.join(file_name);
@@ -264,37 +302,60 @@ where
             continue;
         }
 
-        let url = format!("{}/{}", const_value::MODEL_ONNX_BASE_URL, file_name);
-        let mut response = client
-            .get(&url)
-            .send()
-            .with_context(|| format!("下载模型失败: {url}"))?
-            .error_for_status()
-            .with_context(|| format!("模型接口返回异常状态: {url}"))?;
+        let max_attempts = 3;
+        for attempt in 1..=max_attempts {
+            let url = format!("{}/{}", const_value::MODEL_ONNX_BASE_URL, file_name);
+            let mut response = client
+                .get(&url)
+                .send()
+                .with_context(|| format!("下载模型失败: {url}"))?
+                .error_for_status()
+                .with_context(|| format!("模型接口返回异常状态: {url}"))?;
 
-        let total_bytes = response.content_length();
-        let mut output = File::create(&dest_path)
-            .with_context(|| format!("创建模型文件失败: {}", dest_path.display()))?;
-        let mut downloaded = 0_u64;
-        let mut buffer = [0_u8; 16 * 1024];
+            let total_bytes = response.content_length();
+            let mut output = File::create(&dest_path)
+                .with_context(|| format!("创建模型文件失败: {}", dest_path.display()))?;
+            let mut downloaded = 0_u64;
+            let mut buffer = [0_u8; 16 * 1024];
 
-        loop {
-            let count = response.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            output.write_all(&buffer[..count])?;
-            downloaded += count as u64;
+            loop {
+                let count = response.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..count])?;
+                downloaded += count as u64;
 
-            if let Some(total_bytes) = total_bytes {
-                if total_bytes > 0 {
-                    let ratio = downloaded as f32 / total_bytes as f32;
-                    progress_cb(start_progress + ratio * per_file_progress);
+                if let Some(total_bytes) = total_bytes {
+                    if total_bytes > 0 {
+                        let ratio = downloaded as f32 / total_bytes as f32;
+                        progress_cb(start_progress + ratio * per_file_progress);
+                    }
                 }
             }
-        }
 
-        progress_cb(start_progress + per_file_progress);
+            // 校验 SHA256
+            if let Some(expected) = checksums.get(*file_name) {
+                let actual = compute_sha256(&dest_path)?;
+                if actual == *expected {
+                    progress_cb(start_progress + per_file_progress);
+                    break; // 下载成功
+                } else {
+                    eprintln!(
+                        "警告: {} 校验失败 (期望: {}，实际: {})，删除并重试 ({}/{})",
+                        file_name, expected, actual, attempt, max_attempts
+                    );
+                    let _ = fs::remove_file(&dest_path);
+                    if attempt == max_attempts {
+                        bail!("{} 校验失败，已重试 {} 次仍不通过", file_name, max_attempts);
+                    }
+                    continue;
+                }
+            } else {
+                progress_cb(start_progress + per_file_progress);
+                break; // 下载成功（无校验信息）
+            }
+        }
     }
 
     progress_cb(100.0);
