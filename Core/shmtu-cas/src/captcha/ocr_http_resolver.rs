@@ -1,5 +1,3 @@
-use anyhow::Result;
-
 use super::ocr_http::CaptchaOcrHttp;
 use super::resolver::{CaptchaAnswer, CaptchaResolver, ResolveFuture};
 
@@ -30,13 +28,8 @@ impl OcrHttpCaptchaResolver {
 impl CaptchaResolver for OcrHttpCaptchaResolver {
     fn resolve<'a>(&'a self, image_data: &'a [u8]) -> ResolveFuture<'a> {
         let max_retries = self.max_retries;
-        let owned = image_data.to_vec();
         Box::pin(async move {
-            let expr = tokio::task::spawn_blocking({
-                let ocr = self.ocr.clone();
-                move || -> Result<String> { ocr.ocr_auto_retry(&owned, max_retries) }
-            })
-            .await??;
+            let expr = self.ocr.ocr_auto_retry_async(image_data, max_retries).await?;
             Ok(CaptchaAnswer::expression(expr))
         })
     }
