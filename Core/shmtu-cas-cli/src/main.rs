@@ -206,6 +206,35 @@ fn export_csv(path: &str, bills: &[BillItem]) -> Result<()> {
     parser::export::CsvExporter::new().export(path, bills)
 }
 
+/// 解析最终的 HTTP OCR base URL。
+///
+/// 优先级: 命令行 `--ocr-http-url` > 环境变量 `SHMTU_OCR_HTTP_URL` >
+///         环境变量 `SHMTU_OCR_HOST` (拼接端口, HTTP 端口) > 硬编码默认。
+///
+/// 端口优先级: 命令行 `--ocr-port` (TCP 端口) > `SHMTU_HTTP_PORT` > 21600。
+/// 注意 HTTP OCR API 默认端口是 21600 (与 shmtu-ocr-server C++ server.h 一致)。
+fn resolve_ocr_http_url(override_url: Option<&str>, host: &str, port: u16) -> String {
+    if let Some(url) = override_url {
+        if !url.is_empty() {
+            return url.to_string();
+        }
+    }
+    if let Ok(env_url) = std::env::var("SHMTU_OCR_HTTP_URL") {
+        if !env_url.is_empty() {
+            return env_url;
+        }
+    }
+    if !host.is_empty() {
+        // 优先使用 SHMTU_HTTP_PORT (HTTP OCR API 端口), 否则用 TCP 端口, 最后兜底 21600
+        let http_port: u16 = std::env::var("SHMTU_HTTP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(port);
+        return format!("http://{}:{}", host, http_port);
+    }
+    "http://127.0.0.1:5000".to_string()
+}
+
 /// 根据 CLI 模式构造对应的 CaptchaResolver。
 fn build_resolver(mode: &CaptchaMode, ocr_host: &str, ocr_port: u16, ocr_server_type: &OcrServerType, ocr_http_url: &str) -> Arc<dyn CaptchaResolver> {
     match mode {
@@ -349,6 +378,7 @@ async fn main() -> Result<()> {
         } => {
             let username = user_id.as_deref().unwrap_or(&username);
             let mut epay = EpayAuth::new()?;
+            let ocr_http_url = resolve_ocr_http_url(Some(&ocr_http_url), &ocr_host, ocr_port);
             let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port, &ocr_server_type, &ocr_http_url);
             do_login(&mut epay, username, &password, &resolver).await?;
 
@@ -420,6 +450,7 @@ async fn main() -> Result<()> {
         } => {
             let username = user_id.as_deref().unwrap_or(&username);
             let mut epay = EpayAuth::new()?;
+            let ocr_http_url = resolve_ocr_http_url(Some(&ocr_http_url), &ocr_host, ocr_port);
             let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port, &ocr_server_type, &ocr_http_url);
             do_login(&mut epay, username, &password, &resolver).await?;
 
@@ -464,6 +495,7 @@ async fn main() -> Result<()> {
             println!("正在获取验证码...");
             let client = cas::create_client()?;
             let image_data = captcha::fetch_captcha(&client).await?;
+            let ocr_http_url = resolve_ocr_http_url(Some(&ocr_http_url), &ocr_host, ocr_port);
 
             println!("验证码大小: {} bytes", image_data.len());
 
@@ -527,6 +559,7 @@ async fn main() -> Result<()> {
         } => {
             let username = user_id.as_deref().unwrap_or(&username);
             let mut wx = wechat::WechatAuth::new()?;
+            let ocr_http_url = resolve_ocr_http_url(Some(&ocr_http_url), &ocr_host, ocr_port);
             let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port, &ocr_server_type, &ocr_http_url);
 
             println!("正在探测登录状态...");
