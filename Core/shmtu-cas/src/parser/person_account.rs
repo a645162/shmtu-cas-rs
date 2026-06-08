@@ -22,8 +22,7 @@ pub struct PersonAccountInfo {
     pub nickname: String,
     pub gender: String,
     pub class_name: String,
-    pub mobile: String,
-    pub fixed_line: String,
+    pub phone_num: String,
     pub id_type: String,
     pub id_number: String,
     pub remark: String,
@@ -168,8 +167,12 @@ pub fn parse_person_account(html: &str) -> Result<PersonAccountInfo> {
         nickname: get(&base_info_map, "昵称"),
         gender: get(&base_info_map, "性别"),
         class_name: get(&base_info_map, "班级"),
-        mobile: get(&base_info_map, "手机"),
-        fixed_line: get(&base_info_map, "固话"),
+        // 一卡通页面 "手机" 字段常空, 真实手机号放在 "固话" 字段
+        // phone_num 兼容: 优先取 "手机", 若为空则用 "固话" 的值
+        phone_num: {
+            let mobile = base_info_map.get("手机").cloned().unwrap_or_default();
+            if !mobile.is_empty() { mobile } else { get(&base_info_map, "固话") }
+        },
         id_type: get(&base_info_map, "证件类型"),
         id_number: get(&base_info_map, "证件号码"),
         remark: get(&base_info_map, "备注"),
@@ -234,8 +237,7 @@ mod tests {
         assert_eq!(info.email, "zs@example.com");
         assert_eq!(info.gender, "女");
         assert_eq!(info.class_name, "航运2024-1");
-        assert_eq!(info.mobile, "13800138000");
-        assert_eq!(info.fixed_line, "021-12345678");
+        assert_eq!(info.phone_num, "13800138000");
         assert_eq!(info.id_type, "身份证");
         assert_eq!(info.id_number, "310101199901011234");
         assert_eq!(info.user_type, "本科生");

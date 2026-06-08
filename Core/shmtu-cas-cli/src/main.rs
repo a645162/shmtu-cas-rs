@@ -740,8 +740,7 @@ fn print_person_account(info: &parser::PersonAccountInfo) {
     println!("昵称: {}", info.nickname);
     println!("性别: {}", info.gender);
     println!("班级: {}", info.class_name);
-    println!("手机: {}", info.mobile);
-    println!("固话: {}", info.fixed_line);
+    println!("手机号: {}", info.phone_num);
     println!("证件类型: {}", info.id_type);
     println!("证件号码: {}", info.id_number);
     println!("备注: {}", info.remark);
