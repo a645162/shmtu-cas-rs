@@ -200,6 +200,49 @@ enum Commands {
         #[arg(long, env = "SHMTU_OCR_HTTP_URL", default_value = "http://127.0.0.1:5000")]
         ocr_http_url: String,
     },
+    /// 登录一卡通平台并获取个人账户信息(余额/认证/学工号/证件等)
+    PersonAccount {
+        #[arg(short, long, env = "SHMTU_USERNAME")]
+        username: String,
+
+        /// 用户名(学号)，优先于 --username
+        #[arg(long, env = "SHMTU_USER_ID")]
+        user_id: Option<String>,
+
+        #[arg(short, long, env = "SHMTU_PASSWORD", hide_env_values = true)]
+        password: String,
+
+        /// 验证码模式: ocr(自动识别) 或 manual(手动输入)
+        #[arg(short, long, default_value = "ocr")]
+        captcha: CaptchaMode,
+
+        #[arg(long, env = "SHMTU_OCR_HOST", default_value = "127.0.0.1")]
+        ocr_host: String,
+
+        #[arg(long, env = "SHMTU_OCR_PORT", default_value_t = 21601)]
+        ocr_port: u16,
+
+        /// OCR 服务器协议类型: tcp 或 restful
+        #[arg(long, default_value = "tcp")]
+        ocr_server_type: OcrServerType,
+
+        /// RESTful OCR 服务器地址
+        #[arg(long, env = "SHMTU_OCR_HTTP_URL", default_value = "http://127.0.0.1:5000")]
+        ocr_http_url: String,
+
+        /// 可选: 导出解析结果为 JSON
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// 解析本地个人账户 HTML 文件
+    ParsePersonAccount {
+        #[arg(short, long)]
+        input: String,
+
+        /// 可选: 导出解析结果为 JSON
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 fn export_csv(path: &str, bills: &[BillItem]) -> Result<()> {
@@ -630,7 +673,83 @@ async fn main() -> Result<()> {
                 );
             }
         }
+
+        Commands::PersonAccount {
+            username,
+            user_id,
+            password,
+            captcha: captcha_mode,
+            ocr_host,
+            ocr_port,
+            ocr_server_type,
+            ocr_http_url,
+            output,
+        } => {
+            let username = user_id.as_deref().unwrap_or(&username);
+            let mut epay = EpayAuth::new()?;
+            let ocr_http_url = resolve_ocr_http_url(Some(&ocr_http_url), &ocr_host, ocr_port);
+            let resolver = build_resolver(&captcha_mode, &ocr_host, ocr_port, &ocr_server_type, &ocr_http_url);
+            do_login(&mut epay, username, &password, &resolver).await?;
+
+            println!("正在获取个人账户信息...");
+            let html = epay.get_person_account_html().await?;
+            let info = parser::parse_person_account(&html)?;
+            print_person_account(&info);
+
+            if let Some(path) = output {
+                let json = serde_json::to_string_pretty(&info)?;
+                std::fs::write(&path, json)?;
+                println!("已导出到 {}", path);
+            }
+        }
+
+        Commands::ParsePersonAccount { input, output } => {
+            let html = std::fs::read_to_string(&input)?;
+            let info = parser::parse_person_account(&html)?;
+            print_person_account(&info);
+
+            if let Some(path) = output {
+                let json = serde_json::to_string_pretty(&info)?;
+                std::fs::write(&path, json)?;
+                println!("已导出到 {}", path);
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_person_account(info: &parser::PersonAccountInfo) {
+    println!("===== 个人账户信息 =====");
+    println!(
+        "姓名: {}    实名认证: {}",
+        info.real_name, info.real_name_auth_status
+    );
+    println!();
+    println!("[资金信息]");
+    println!("现金资金: {} 元 ({})", info.cash_balance_raw, info.cash_balance);
+    println!();
+    println!("[安全信息]");
+    println!("安全保护问题: {}", info.security_question_status);
+    println!("注册时间: {}", info.register_date);
+    println!();
+    println!("[基本信息]");
+    println!("学工号: {}", info.student_id);
+    println!("电子邮箱: {}", info.email);
+    println!("真实姓名: {}", info.real_name);
+    println!("昵称: {}", info.nickname);
+    println!("性别: {}", info.gender);
+    println!("班级: {}", info.class_name);
+    println!("手机: {}", info.mobile);
+    println!("固话: {}", info.fixed_line);
+    println!("证件类型: {}", info.id_type);
+    println!("证件号码: {}", info.id_number);
+    println!("备注: {}", info.remark);
+    println!("用户类型: {}", info.user_type);
+    if !info.csrf_token.is_empty() {
+        println!();
+        println!("[CSRF]");
+        println!("token: {}", info.csrf_token);
+        println!("header: {}", info.csrf_header);
+    }
 }

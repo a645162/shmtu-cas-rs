@@ -13,6 +13,7 @@ struct CookieEntry {
 }
 
 const EPAY_BILL_URL: &str = "https://ecard.shmtu.edu.cn/epay/consume/query";
+const EPAY_PERSON_ACCOUNT_URL: &str = "https://ecard.shmtu.edu.cn/epay/personaccount/index";
 
 /// Cookie 管理器：将 cookies 注入到 HTTP 请求的 Cookie header
 struct CookieJar {
@@ -264,6 +265,30 @@ impl EpayAuth {
             bail!("未登录，需要重新登录");
         } else {
             bail!("获取账单失败，状态码: {}", resp.status());
+        }
+    }
+
+    /// 访问 `/epay/personaccount/index` 页面。
+    ///
+    /// 经验证,无需 Referer 也能正常获取完整页面内容;只发送 epay 的会话 Cookie
+    /// (依赖登录态)即可。需要已登录的 epay cookies。
+    ///
+    /// 对齐 Kotlin ``EpayAuth.getPersonAccountHtml`` 与 Python ``EpayAuth.get_person_account_html``。
+    pub async fn get_person_account_html(&self) -> Result<String> {
+        let resp = self.get_with_cookies(EPAY_PERSON_ACCOUNT_URL).await
+            .context("获取个人账户页失败")?;
+
+        if resp.status() == StatusCode::OK {
+            Ok(resp.text().await?)
+        } else if resp.status() == StatusCode::FOUND {
+            let location = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            bail!("未登录或会话已过期，需要重新登录 (302 -> {})", location);
+        } else {
+            bail!("获取个人账户页失败，状态码: {}", resp.status());
         }
     }
 }
