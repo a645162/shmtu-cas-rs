@@ -1,6 +1,19 @@
 use anyhow::Result;
 use scraper::{Html, Selector};
 
+/// 根据身份证号第 17 位推断性别: 奇数=男性, 偶数=女性, 否则返回 ""。
+pub fn guess_gender_from_id_number(id_number: &str) -> &'static str {
+    if id_number.len() < 17 {
+        return "";
+    }
+    let ch = id_number.as_bytes()[16] as char;
+    if !ch.is_ascii_digit() {
+        return "";
+    }
+    let digit = (ch as u8 - b'0') % 2;
+    if digit == 1 { "男性" } else { "女性" }
+}
+
 /// 一卡通个人账户页解析结果
 ///
 /// 对应 `/epay/personaccount/index` 接口的 HTML。
@@ -23,6 +36,7 @@ pub struct PersonAccountInfo {
     pub gender: String,
     pub class_name: String,
     pub phone_num: String,
+    pub gender_from_id: String,
     pub id_type: String,
     pub id_number: String,
     pub remark: String,
@@ -173,6 +187,7 @@ pub fn parse_person_account(html: &str) -> Result<PersonAccountInfo> {
             let mobile = base_info_map.get("手机").cloned().unwrap_or_default();
             if !mobile.is_empty() { mobile } else { get(&base_info_map, "固话") }
         },
+        gender_from_id: guess_gender_from_id_number(&get(&base_info_map, "证件号码")).to_string(),
         id_type: get(&base_info_map, "证件类型"),
         id_number: get(&base_info_map, "证件号码"),
         remark: get(&base_info_map, "备注"),
@@ -238,6 +253,7 @@ mod tests {
         assert_eq!(info.gender, "女");
         assert_eq!(info.class_name, "航运2024-1");
         assert_eq!(info.phone_num, "13800138000");
+        assert_eq!(info.gender_from_id, "男性"); // 310101199901011234: 第17位=3(奇数)
         assert_eq!(info.id_type, "身份证");
         assert_eq!(info.id_number, "310101199901011234");
         assert_eq!(info.user_type, "本科生");
