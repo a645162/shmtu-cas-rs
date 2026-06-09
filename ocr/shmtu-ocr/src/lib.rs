@@ -1,6 +1,8 @@
 pub mod backend;
 pub mod downloader;
 pub mod image;
+pub mod tag_catalog;
+pub mod tag_resolver;
 
 /// 模型文件名常量。对齐 C# 的 ConstValue。
 ///
@@ -32,6 +34,17 @@ pub mod const_value {
         pub const BASE_URL_GITEE: &str =
             "https://gitee.com/a645162/shmtu-cas-ocr-model/releases/download";
         pub const MANIFEST_NAME: &str = "model-assets.json";
+
+        /// 客户端支持的最大主版本号（解析 latest tag 时不会拉取超过此 major 的 release）。
+        pub const MAX_SUPPORTED_MAJOR: u32 = 2;
+        /// 客户端支持的最大次版本号。`u32::MAX` 表示不限 minor，只锁 major。
+        /// 当前用户要求：支持 2.x (小于 3 即可)，设 u32::MAX。
+        pub const MAX_SUPPORTED_MINOR: u32 = u32::MAX;
+        /// GitHub 仓库名（owner/repo），用于 releases API。
+        pub const GITHUB_REPO: &str = "a645162/shmtu-cas-ocr-model";
+        /// GitHub releases API URL。
+        pub const GITHUB_RELEASES_API: &str =
+            "https://api.github.com/repos/a645162/shmtu-cas-ocr-model/releases";
 
         /// 拼出模型文件名: `{backbone}.trislot_decoder.v2_0.{precision}.onnx`
         pub fn build_model_name(backbone: &str, precision: &str) -> String {

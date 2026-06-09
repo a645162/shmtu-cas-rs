@@ -17,7 +17,7 @@ use crate::const_value;
 /// 解析 `v{major}.{minor}.{patch}` 格式的 tag。失败返回 None。
 ///
 /// 不依赖 regex crate，纯字符串切分。
-fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
     let stripped = tag.strip_prefix('v')?;
     let parts: Vec<&str> = stripped.split('.').collect();
     if parts.len() != 3 {
