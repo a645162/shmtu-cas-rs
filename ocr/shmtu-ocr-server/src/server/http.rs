@@ -17,6 +17,7 @@ pub async fn health_check(State(pool): State<Arc<OcrPool>>) -> Json<HealthRespon
         pool_size: pool.pool_size(),
         queue_capacity: pool.queue_capacity(),
         pending_requests: pending,
+        model_version: pool.model_version().as_str().to_string(),
         server_name: pool.server_name().map(String::from),
     })
 }
@@ -26,12 +27,30 @@ pub async fn ocr_base64(
     Json(req): Json<OcrRequest>,
 ) -> Result<Json<OcrResponse>, (StatusCode, Json<OcrResponse>)> {
     if req.image_base64.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(OcrResponse::error("image_base64 is empty"))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(OcrResponse::error("image_base64 is empty")),
+        ));
     }
+    let mv = pool.model_version().as_str().to_string();
     match pool.submit_base64(&req.image_base64).await {
-        None => Err((StatusCode::SERVICE_UNAVAILABLE, Json(OcrResponse::error("Queue full")))),
-        Some(Ok(r)) => Ok(Json(OcrResponse::success(r.expr, r.result, r.equal_symbol as i32, r.operator as i32, r.digit1, r.digit2))),
-        Some(Err(e)) => Err((StatusCode::UNPROCESSABLE_ENTITY, Json(OcrResponse::error(e.to_string())))),
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(OcrResponse::error("Queue full")),
+        )),
+        Some(Ok(r)) => Ok(Json(OcrResponse::success(
+            r.expr,
+            r.result,
+            r.equal_symbol as i32,
+            r.operator as i32,
+            r.digit1,
+            r.digit2,
+            mv,
+        ))),
+        Some(Err(e)) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(OcrResponse::error(e.to_string())),
+        )),
     }
 }
 
@@ -42,18 +61,40 @@ pub async fn ocr_upload(
     let mut image_data: Option<Vec<u8>> = None;
     while let Some(field) = multipart.next_field().await.unwrap_or(None) {
         if field.name() == Some("file") || field.name() == Some("image") {
-            if let Ok(bytes) = field.bytes().await { image_data = Some(bytes.to_vec()); }
+            if let Ok(bytes) = field.bytes().await {
+                image_data = Some(bytes.to_vec());
+            }
             break;
         }
     }
     let data = match image_data {
         Some(d) => d,
-        None => return Err((StatusCode::BAD_REQUEST, Json(OcrResponse::error("No file uploaded")))),
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(OcrResponse::error("No file uploaded")),
+            ));
+        }
     };
+    let mv = pool.model_version().as_str().to_string();
     match pool.submit(data).await {
-        None => Err((StatusCode::SERVICE_UNAVAILABLE, Json(OcrResponse::error("Queue full")))),
-        Some(Ok(r)) => Ok(Json(OcrResponse::success(r.expr, r.result, r.equal_symbol as i32, r.operator as i32, r.digit1, r.digit2))),
-        Some(Err(e)) => Err((StatusCode::UNPROCESSABLE_ENTITY, Json(OcrResponse::error(e.to_string())))),
+        None => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(OcrResponse::error("Queue full")),
+        )),
+        Some(Ok(r)) => Ok(Json(OcrResponse::success(
+            r.expr,
+            r.result,
+            r.equal_symbol as i32,
+            r.operator as i32,
+            r.digit1,
+            r.digit2,
+            mv,
+        ))),
+        Some(Err(e)) => Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(OcrResponse::error(e.to_string())),
+        )),
     }
 }
 
@@ -71,6 +112,7 @@ pub async fn get_status(State(pool): State<Arc<OcrPool>>) -> Json<StatusResponse
         total_requests: pool.total_requests(),
         success_count: pool.success_count(),
         failure_count: pool.failure_count(),
+        model_version: pool.model_version().as_str().to_string(),
         server_name: pool.server_name().map(String::from),
     })
 }

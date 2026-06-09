@@ -9,3 +9,9 @@ ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 ndarray = "0.17"
 image = "0.25"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["fs", "io-util"] }
+reqwest = { version = "0.12", features = ["json"] }

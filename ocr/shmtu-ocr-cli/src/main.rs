@@ -2,11 +2,14 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use shmtu_cas::captcha;
 use shmtu_cas::cas;
-use shmtu_ocr::backend::CasOnnxBackend;
+use shmtu_ocr::backend::OcrBackend;
+use shmtu_ocr::const_value;
+use shmtu_ocr::ModelVersion;
 use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +32,10 @@ enum Commands {
         /// 模型目录
         #[arg(long, default_value = "./Model")]
         model_dir: String,
+
+        /// 模型版本 (v1 / v2, 默认 v2)
+        #[arg(long, default_value = "v2", env = "SHMTU_OCR_VERSION")]
+        version: String,
     },
     /// 从 CAS 服务器拉取验证码并识别，对比远端 OCR 结果
     Compare {
@@ -47,6 +54,10 @@ enum Commands {
         /// 测试轮数
         #[arg(short, long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
         rounds: u32,
+
+        /// 模型版本 (v1 / v2, 默认 v2)
+        #[arg(long, default_value = "v2", env = "SHMTU_OCR_VERSION")]
+        version: String,
     },
     /// 从 CAS 服务器拉取验证码并仅用本地 ONNX 识别
     Fetch {
@@ -57,12 +68,20 @@ enum Commands {
         /// 测试轮数
         #[arg(short, long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
         rounds: u32,
+
+        /// 模型版本 (v1 / v2, 默认 v2)
+        #[arg(long, default_value = "v2", env = "SHMTU_OCR_VERSION")]
+        version: String,
     },
     /// 下载 ONNX 模型文件
     DownloadModel {
         /// 目标目录
         #[arg(long, default_value = "./Model")]
         model_dir: String,
+
+        /// 模型版本 (v1 / v2, 默认 v2)
+        #[arg(long, default_value = "v2", env = "SHMTU_OCR_VERSION")]
+        version: String,
     },
 }
 
@@ -77,17 +96,22 @@ fn resolve_path(path: impl AsRef<Path>) -> Result<PathBuf> {
     }
 }
 
-fn load_backend(model_dir: &Path) -> Result<CasOnnxBackend> {
-    let missing = CasOnnxBackend::missing_model_files(model_dir);
+fn parse_version(s: &str) -> ModelVersion {
+    ModelVersion::parse_or_default(s)
+}
+
+fn load_backend(model_dir: &Path, version: ModelVersion) -> Result<OcrBackend> {
+    let missing = OcrBackend::missing_model_files(version, model_dir);
     if !missing.is_empty() {
         let missing = missing.join(", ");
         bail!(
-            "模型文件不完整，缺少: {}。请先运行 `shmtu-ocr download-model --model-dir {}`",
+            "模型文件不完整，缺少: {}。请先运行 `shmtu-ocr download-model --version {} --model-dir {}`",
             missing,
+            version.as_str(),
             model_dir.display()
         );
     }
-    CasOnnxBackend::load(model_dir).context("加载 ONNX 模型失败")
+    OcrBackend::load(version, model_dir).context("加载 ONNX 模型失败")
 }
 
 fn compute_sha256(path: &Path) -> Result<String> {
@@ -105,22 +129,26 @@ fn compute_sha256(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn download_model(model_dir: &Path) -> Result<()> {
-    use shmtu_ocr::const_value;
+fn download_model(model_dir: &Path, version: ModelVersion) -> Result<()> {
+    match version {
+        ModelVersion::V1 => download_model_v1(model_dir),
+        ModelVersion::V2 => download_model_v2(model_dir),
+    }
+}
 
+fn download_model_v1(model_dir: &Path) -> Result<()> {
     let files = [
-        const_value::MODEL_ONNX_EQUAL_FP32,
-        const_value::MODEL_ONNX_OPERATOR_FP32,
-        const_value::MODEL_ONNX_DIGIT_FP32,
+        const_value::v1::MODEL_ONNX_EQUAL,
+        const_value::v1::MODEL_ONNX_OPERATOR,
+        const_value::v1::MODEL_ONNX_DIGIT,
     ];
 
     std::fs::create_dir_all(model_dir)?;
 
     let client = reqwest::blocking::Client::new();
 
-    // 获取校验文件
     let checksums: HashMap<String, String> = match client
-        .get(const_value::MODEL_ONNX_CHECKSUM_URL)
+        .get(const_value::v1::CHECKSUM_URL)
         .send()
     {
         Ok(resp) if resp.status().is_success() => {
@@ -137,14 +165,11 @@ fn download_model(model_dir: &Path) -> Result<()> {
                 .collect()
         }
         Ok(resp) => {
-            eprintln!(
-                "警告: 获取校验文件失败 (HTTP {})，跳过完整性验证",
-                resp.status()
-            );
+            warn!("获取校验文件失败 (HTTP {}), 跳过完整性验证", resp.status());
             HashMap::new()
         }
         Err(e) => {
-            eprintln!("警告: 获取校验文件失败 ({})，跳过完整性验证", e);
+            warn!("获取校验文件失败 ({}), 跳过完整性验证", e);
             HashMap::new()
         }
     };
@@ -152,13 +177,13 @@ fn download_model(model_dir: &Path) -> Result<()> {
     for file in &files {
         let dest = model_dir.join(file);
         if dest.exists() {
-            println!("{} 已存在，跳过", file);
+            println!("{} 已存在, 跳过", file);
             continue;
         }
 
         let max_attempts = 3;
         for attempt in 1..=max_attempts {
-            let url = format!("{}/{}", const_value::MODEL_ONNX_BASE_URL, file);
+            let url = format!("{}/{}", const_value::v1::BASE_URL_GITEE, file);
             if attempt > 1 {
                 println!("重试下载 {} (第 {}/{} 次)...", file, attempt, max_attempts);
             } else {
@@ -175,14 +200,13 @@ fn download_model(model_dir: &Path) -> Result<()> {
             resp.copy_to(&mut out)?;
             drop(out);
 
-            // 校验 SHA256
             if let Some(expected) = checksums.get(*file) {
                 let actual = compute_sha256(&dest)?;
                 if actual == *expected {
                     println!("{} 下载完成 (校验通过)", file);
                 } else {
                     eprintln!(
-                        "警告: {} 校验失败 (期望: {}，实际: {})，删除并重试",
+                        "警告: {} 校验失败 (期望: {}, 实际: {}), 删除并重试",
                         file, expected, actual
                     );
                     std::fs::remove_file(&dest)?;
@@ -195,11 +219,20 @@ fn download_model(model_dir: &Path) -> Result<()> {
                 println!("{} 下载完成 (无校验信息)", file);
             }
 
-            break; // 下载成功
+            break;
         }
     }
 
-    println!("所有模型下载完成 → {}", model_dir.display());
+    println!("所有 v1 模型下载完成 → {}", model_dir.display());
+    Ok(())
+}
+
+fn download_model_v2(model_dir: &Path) -> Result<()> {
+    let opts = shmtu_ocr::downloader::V2DownloadOptions::with_defaults(model_dir);
+    println!("下载 v2 模型: {}", opts.model_name());
+    let rt = tokio::runtime::Runtime::new().context("创建 tokio runtime 失败")?;
+    let dest = rt.block_on(shmtu_ocr::downloader::download_v2(&opts))?;
+    println!("v2 模型下载完成 → {}", dest.display());
     Ok(())
 }
 
@@ -227,14 +260,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Image { path, model_dir } => {
+        Commands::Image { path, model_dir, version } => {
             let model_dir = resolve_path(&model_dir)?;
-            let mut backend = load_backend(&model_dir)?;
+            let version = parse_version(&version);
+            let mut backend = load_backend(&model_dir, version)?;
             let start = Instant::now();
             let result = backend.predict_file(&path)?;
             let elapsed = start.elapsed();
             println!("图片: {}", path);
             println!("模型目录: {}", model_dir.display());
+            println!("模型版本: {}", version.as_str());
             println!("算式: {}", result.expr);
             println!("答案: {}", result.result);
             println!(
@@ -249,9 +284,11 @@ async fn main() -> Result<()> {
             ocr_host,
             ocr_port,
             rounds,
+            version,
         } => {
             let model_dir = resolve_path(&model_dir)?;
-            let mut backend = load_backend(&model_dir)?;
+            let version = parse_version(&version);
+            let mut backend = load_backend(&model_dir, version)?;
             let ocr = captcha::CaptchaOcr::new(&ocr_host, ocr_port);
             let client = cas::create_client()?;
 
@@ -263,6 +300,7 @@ async fn main() -> Result<()> {
             let mut remote_elapsed_total = Duration::ZERO;
 
             println!("模型目录: {}", model_dir.display());
+            println!("模型版本: {}", version.as_str());
             println!("远端 OCR: {}:{}", ocr_host, ocr_port);
 
             for i in 1..=rounds {
@@ -366,15 +404,17 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::Fetch { model_dir, rounds } => {
+        Commands::Fetch { model_dir, rounds, version } => {
             let model_dir = resolve_path(&model_dir)?;
-            let mut backend = load_backend(&model_dir)?;
+            let version = parse_version(&version);
+            let mut backend = load_backend(&model_dir, version)?;
             let client = cas::create_client()?;
 
             let mut ok = 0_u32;
             let mut local_elapsed_total = Duration::ZERO;
 
             println!("模型目录: {}", model_dir.display());
+            println!("模型版本: {}", version.as_str());
 
             for i in 1..=rounds {
                 let image_data = captcha::fetch_captcha(&client).await?;
@@ -406,9 +446,10 @@ async fn main() -> Result<()> {
             println!("平均耗时: {}", format_avg_ms(local_elapsed_total, ok));
         }
 
-        Commands::DownloadModel { model_dir } => {
+        Commands::DownloadModel { model_dir, version } => {
             let model_dir = resolve_path(&model_dir)?;
-            download_model(&model_dir)?;
+            let version = parse_version(&version);
+            download_model(&model_dir, version)?;
         }
     }
 

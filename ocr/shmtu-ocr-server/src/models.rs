@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct OcrRequest {
     pub image_base64: String,
+    /// 可选: 覆盖服务端默认模型版本 (v1 / v2)。
+    #[serde(default)]
+    pub model_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -15,14 +18,43 @@ pub struct OcrResponse {
     pub digit1: Option<i32>,
     pub digit2: Option<i32>,
     pub error: Option<String>,
+    pub model_version: Option<String>,
 }
 
 impl OcrResponse {
-    pub fn success(expr: String, result: i32, equal_symbol: i32, op: i32, d1: i32, d2: i32) -> Self {
-        Self { success: true, expression: Some(expr), result: Some(result), equal_symbol: Some(equal_symbol), operator: Some(op), digit1: Some(d1), digit2: Some(d2), error: None }
+    pub fn success(
+        expr: String,
+        result: i32,
+        equal_symbol: i32,
+        op: i32,
+        d1: i32,
+        d2: i32,
+        model_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            expression: Some(expr),
+            result: Some(result),
+            equal_symbol: Some(equal_symbol),
+            operator: Some(op),
+            digit1: Some(d1),
+            digit2: Some(d2),
+            error: None,
+            model_version: Some(model_version.into()),
+        }
     }
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { success: false, expression: None, result: None, equal_symbol: None, operator: None, digit1: None, digit2: None, error: Some(msg.into()) }
+        Self {
+            success: false,
+            expression: None,
+            result: None,
+            equal_symbol: None,
+            operator: None,
+            digit1: None,
+            digit2: None,
+            error: Some(msg.into()),
+            model_version: None,
+        }
     }
 }
 
@@ -35,6 +67,7 @@ pub struct HealthResponse {
     pub pool_size: usize,
     pub queue_capacity: usize,
     pub pending_requests: usize,
+    pub model_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
 }
@@ -52,6 +85,7 @@ pub struct StatusResponse {
     pub total_requests: u64,
     pub success_count: u64,
     pub failure_count: u64,
+    pub model_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
 }

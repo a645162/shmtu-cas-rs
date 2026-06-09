@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use clap::Parser;
+use shmtu_ocr::ModelVersion;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -34,6 +35,9 @@ struct Cli {
     queue_capacity: usize,
     #[arg(long)]
     server_name: Option<String>,
+    /// 模型版本: v1 / v2, 默认 v2。也可通过环境变量 SHMTU_OCR_VERSION 设置。
+    #[arg(long, default_value = "v2", env = "SHMTU_OCR_VERSION")]
+    version: String,
 }
 
 #[tokio::main]
@@ -46,10 +50,20 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    let model_version = ModelVersion::parse_or_default(&cli.version);
+
     println!("Model dir: {}", cli.model_dir);
+    println!("Model version: {}", model_version.as_str());
     println!("Workers: {}, Queue: {}", cli.workers, cli.queue_capacity);
 
-    let pool = OcrPool::new(&cli.model_dir, cli.workers, cli.queue_capacity, cli.gpu, cli.server_name)?;
+    let pool = OcrPool::new(
+        &cli.model_dir,
+        cli.workers,
+        cli.queue_capacity,
+        cli.gpu,
+        cli.server_name,
+        model_version,
+    )?;
     pool.start_workers();
 
     let shared_state = Arc::new(pool);
