@@ -8,9 +8,11 @@
 //! - 任何错误（网络失败、API 限流、JSON 解析失败、范围内无匹配）一律
 //!   fallback 到调用方提供的 `fallback` tag，并打 `tracing::warn!`。
 //! - 仅影响 v2 流程，v1 完全不动。
+//! - 支持 `GITHUB_TOKEN` / `GH_TOKEN` 环境变量以提升 API 限流阈值
+//!   （未鉴权 60 req/h，鉴权后 5000 req/h）。
 
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::const_value;
 
@@ -28,6 +30,37 @@ pub(crate) fn parse_semver_tag(tag: &str) -> Option<(u32, u32, u32)> {
 
 /// `max_minor == u32::MAX` 表示"不限 minor,只锁 major"。
 const UNBOUNDED_MINOR: u32 = u32::MAX;
+
+/// 构建 reqwest client，支持可选的 GitHub token 鉴权。
+/// - 优先读 `GITHUB_TOKEN`，其次 `GH_TOKEN`
+/// - 无 token 时不设 Authorization header（未鉴权限流 60 req/h / IP）
+fn build_client_opt() -> Option<reqwest::Client> {
+    let token = std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let has_token = !token.is_empty();
+    let mut headers = reqwest::header::HeaderMap::new();
+    if has_token {
+        if let Ok(auth_value) =
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+        {
+            headers.insert(reqwest::header::AUTHORIZATION, auth_value);
+        }
+    }
+    let mut builder = reqwest::Client::builder()
+        .user_agent("shmtu-ocr/resolve_latest_tag")
+        .timeout(std::time::Duration::from_secs(10));
+    if !headers.is_empty() {
+        builder = builder.default_headers(headers);
+    }
+    let client = builder.build().ok()?;
+    if has_token {
+        info!("GitHub API 鉴权已启用 (env GITHUB_TOKEN/GH_TOKEN)");
+    }
+    Some(client)
+}
 
 /// GitHub releases API 返回的 release 对象（仅用到的字段）。
 #[derive(Debug, Clone, Deserialize)]
@@ -58,15 +91,20 @@ pub async fn resolve_latest_tag(max_major: u32, max_minor: u32, fallback: &str) 
     } else {
         format!("v{}.{}.x", max_major, max_minor)
     };
+    info!(
+        "resolve_latest_tag: 开始解析, URL={}, 范围={}",
+        url, filter_desc
+    );
     match fetch_and_pick(url, max_major, max_minor).await {
         Some(tag) => {
-            tracing::info!("自动解析 v2 最新 tag: {} (范围 {})", tag, filter_desc);
+            info!("自动解析 v2 最新 tag: {} (范围 {})", tag, filter_desc);
             tag
         }
         None => {
             warn!(
-                "无法从 GitHub releases 解析最新 v2 tag (范围 {}),fallback -> {}",
-                filter_desc, fallback
+                "无法从 GitHub releases 解析最新 v2 tag (范围 {}), URL={}, fallback -> {}. \
+                 如果反复出现此告警，请设置 GITHUB_TOKEN 环境变量提升 API 限流阈值 (未鉴权 60 req/h/IP).",
+                filter_desc, url, fallback
             );
             fallback.to_string()
         }
@@ -74,18 +112,17 @@ pub async fn resolve_latest_tag(max_major: u32, max_minor: u32, fallback: &str) 
 }
 
 async fn fetch_and_pick(api_url: &str, max_major: u32, max_minor: u32) -> Option<String> {
-    let client = reqwest::Client::builder()
-        .user_agent("shmtu-ocr/resolve_latest_tag")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
+    let client = build_client_opt()?;
 
     let url = format!("{}?per_page=100", api_url);
+    info!("fetch_and_pick: GET {}", url);
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         warn!(
-            "GitHub releases API 返回非成功状态: HTTP {}",
-            resp.status()
+            "GitHub releases API 返回非成功状态: HTTP {} for {}. \
+             未鉴权限流 60 req/h (共享 IP 共用此配额). 设置 GITHUB_TOKEN 可提升至 5000 req/h.",
+            resp.status(),
+            url
         );
         return None;
     }
@@ -99,7 +136,6 @@ async fn fetch_and_pick(api_url: &str, max_major: u32, max_minor: u32) -> Option
             if maj != max_major {
                 return None;
             }
-            // max_minor == u32::MAX 表示无 minor 上界（只锁 major）。
             if max_minor != UNBOUNDED_MINOR && min > max_minor {
                 return None;
             }
@@ -107,9 +143,15 @@ async fn fetch_and_pick(api_url: &str, max_major: u32, max_minor: u32) -> Option
         })
         .collect();
 
-    // 降序排列:major desc, minor desc, patch desc
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)));
-    candidates.into_iter().next().map(|(_, _, _, tag)| tag)
+    let picked = candidates.into_iter().next().map(|(_, _, _, tag)| tag);
+    if picked.is_none() {
+        warn!(
+            "fetch_and_pick: 范围内无匹配 release (major={}, max_minor={})",
+            max_major, max_minor
+        );
+    }
+    picked
 }
 
 #[cfg(test)]

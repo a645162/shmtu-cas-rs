@@ -37,6 +37,7 @@ impl Mirror {
 
 #[derive(Debug, Clone, Deserialize)]
 struct V2ArtifactFile {
+    #[allow(dead_code)]
     path: String,
     sha256: String,
     release_asset_name: String,
@@ -64,7 +65,10 @@ struct V2Manifest {
 /// v2 下载选项。
 #[derive(Debug, Clone)]
 pub struct V2DownloadOptions {
-    pub tag: String,
+    /// release tag。`None` 表示自动从 GitHub releases API 解析最新可用 tag
+    /// （范围 `v{MAX_SUPPORTED_MAJOR}.{<=MAX_SUPPORTED_MINOR}.x`，失败 fallback 到
+    /// `const_value::v2::DEFAULT_TAG`）；`Some("")` 也视为自动解析。
+    pub tag: Option<String>,
     pub backbone: String,
     pub precision: String,
     pub mirror: Mirror,
@@ -75,9 +79,11 @@ pub struct V2DownloadOptions {
 
 impl V2DownloadOptions {
     /// 基于 const_value::v2 默认值的便捷构造（默认走 Github, 可自动 fallback）。
+    ///
+    /// `tag` 传 `None` 以启用自动解析，传 `Some("v2.0.2")` 锁定指定版本。
     pub fn with_defaults(dest: impl AsRef<Path>) -> Self {
         Self {
-            tag: const_value::v2::DEFAULT_TAG.to_string(),
+            tag: None,
             backbone: const_value::v2::DEFAULT_BACKBONE.to_string(),
             precision: const_value::v2::DEFAULT_PRECISION.to_string(),
             mirror: Mirror::Github,
@@ -86,8 +92,34 @@ impl V2DownloadOptions {
         }
     }
 
+    /// 显式指定 tag 的便捷构造。
+    pub fn with_tag(dest: impl AsRef<Path>, tag: impl Into<String>) -> Self {
+        let mut opts = Self::with_defaults(dest);
+        opts.tag = Some(tag.into());
+        opts
+    }
+
     pub fn model_name(&self) -> String {
         const_value::v2::build_model_name(&self.backbone, &self.precision)
+    }
+}
+
+/// 解析 `opts.tag`：
+/// - `None` 或 `Some("")` → 自动解析，失败 fallback 到 `const_value::v2::DEFAULT_TAG`
+/// - `Some(s)` 去除首尾空白后使用
+async fn resolve_tag(opts: &V2DownloadOptions) -> String {
+    use crate::tag_resolver::resolve_latest_tag;
+    let raw = opts.tag.as_deref().map(str::trim);
+    match raw {
+        None | Some("") => {
+            resolve_latest_tag(
+                const_value::v2::MAX_SUPPORTED_MAJOR,
+                const_value::v2::MAX_SUPPORTED_MINOR,
+                const_value::v2::DEFAULT_TAG,
+            )
+            .await
+        }
+        Some(s) => s.to_string(),
     }
 }
 
@@ -197,10 +229,14 @@ pub async fn download_v2(opts: &V2DownloadOptions) -> Result<PathBuf> {
         .await
         .with_context(|| format!("创建目录失败: {}", opts.dest.display()))?;
 
+    // 解析 tag：None / "" → 自动从 GitHub releases 拉，失败 fallback DEFAULT_TAG
+    let tag = resolve_tag(opts).await;
+    info!("v2 下载使用 tag: {}", tag);
+
     let mut manifest: Option<V2Manifest> = None;
     let mut last_err: Option<anyhow::Error> = None;
     for &m in Mirror::preferred_order() {
-        match fetch_manifest(&client, m, &opts.tag).await {
+        match fetch_manifest(&client, m, &tag).await {
             Ok((mf, url)) => {
                 info!("v2 manifest 拉取成功 ({}): {}", m.v2_base(), url);
                 manifest = Some(mf);
@@ -250,7 +286,7 @@ pub async fn download_v2(opts: &V2DownloadOptions) -> Result<PathBuf> {
 
     let mut last_dl_err: Option<anyhow::Error> = None;
     for &m in Mirror::preferred_order() {
-        let url = format!("{}/{}/{}", m.v2_base(), opts.tag, file.release_asset_name);
+        let url = format!("{}/{}/{}", m.v2_base(), tag, file.release_asset_name);
         info!("下载 v2 模型: {}", url);
         match download_to_file(&client, &url, &dest).await {
             Ok(n) => {
