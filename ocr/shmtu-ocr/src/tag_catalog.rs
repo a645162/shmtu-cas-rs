@@ -63,6 +63,7 @@ pub struct TagInfo {
 /// - `max_major`: 主版本号锁 (当前 2)
 /// - `max_minor`: 次版本号锁, `u32::MAX` 时不限
 /// - 返回按 API 默认顺序 (最新在前) 的列表 (最多 100 条)
+/// - 同时过滤掉低于 `const_value::v2::MIN_SUPPORTED_*` 的 tag
 pub async fn list_candidate_v2_tags(
     max_major: u32,
     max_minor: u32,
@@ -95,12 +96,15 @@ pub async fn list_candidate_v2_tags(
         "list_candidate_v2_tags: 收到 {} 个 release",
         releases.len()
     );
+    let min_major = const_value::v2::MIN_SUPPORTED_MAJOR;
+    let min_minor = const_value::v2::MIN_SUPPORTED_MINOR;
+    let min_patch = const_value::v2::MIN_SUPPORTED_PATCH;
     let mut out = Vec::new();
     for r in releases {
         if r.draft {
             continue;
         }
-        let (mj, mn, _pat) = match tag_resolver::parse_semver_tag(&r.tag_name) {
+        let (mj, mn, pat) = match tag_resolver::parse_semver_tag(&r.tag_name) {
             Some(t) => t,
             None => continue,
         };
@@ -108,6 +112,10 @@ pub async fn list_candidate_v2_tags(
             continue;
         }
         if max_minor != UNBOUNDED_MINOR && mn > max_minor {
+            continue;
+        }
+        // 过滤低于最小版本的 tag
+        if (mj, mn, pat) < (min_major, min_minor, min_patch) {
             continue;
         }
         out.push(TagInfo {

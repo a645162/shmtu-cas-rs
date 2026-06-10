@@ -106,20 +106,30 @@ impl V2DownloadOptions {
 
 /// 解析 `opts.tag`：
 /// - `None` 或 `Some("")` → 自动解析，失败 fallback 到 `const_value::v2::DEFAULT_TAG`
-/// - `Some(s)` 去除首尾空白后使用
-async fn resolve_tag(opts: &V2DownloadOptions) -> String {
-    use crate::tag_resolver::resolve_latest_tag;
+/// - `Some(s)` 去除首尾空白后使用，同时校验是否满足最小版本约束
+async fn resolve_tag(opts: &V2DownloadOptions) -> Result<String> {
+    use crate::tag_resolver::validate_tag_min_version;
     let raw = opts.tag.as_deref().map(str::trim);
     match raw {
         None | Some("") => {
-            resolve_latest_tag(
+            let tag = crate::tag_resolver::resolve_latest_tag(
                 const_value::v2::MAX_SUPPORTED_MAJOR,
                 const_value::v2::MAX_SUPPORTED_MINOR,
                 const_value::v2::DEFAULT_TAG,
             )
-            .await
+            .await;
+            Ok(tag)
         }
-        Some(s) => s.to_string(),
+        Some(s) => {
+            validate_tag_min_version(
+                s,
+                const_value::v2::MIN_SUPPORTED_MAJOR,
+                const_value::v2::MIN_SUPPORTED_MINOR,
+                const_value::v2::MIN_SUPPORTED_PATCH,
+            )
+            .map_err(|e| anyhow!(e))?;
+            Ok(s.to_string())
+        }
     }
 }
 
@@ -230,7 +240,8 @@ pub async fn download_v2(opts: &V2DownloadOptions) -> Result<PathBuf> {
         .with_context(|| format!("创建目录失败: {}", opts.dest.display()))?;
 
     // 解析 tag：None / "" → 自动从 GitHub releases 拉，失败 fallback DEFAULT_TAG
-    let tag = resolve_tag(opts).await;
+    // 手动指定 tag 时校验最小版本约束
+    let tag = resolve_tag(opts).await?;
     info!("v2 下载使用 tag: {}", tag);
 
     let mut manifest: Option<V2Manifest> = None;

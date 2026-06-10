@@ -40,6 +40,14 @@ pub mod const_value {
         /// 客户端支持的最大次版本号。`u32::MAX` 表示不限 minor，只锁 major。
         /// 当前用户要求：支持 2.x (小于 3 即可)，设 u32::MAX。
         pub const MAX_SUPPORTED_MINOR: u32 = u32::MAX;
+
+        /// 客户端支持的最小主版本号。低于此版本的 tag 不允许选择。
+        pub const MIN_SUPPORTED_MAJOR: u32 = 2;
+        /// 客户端支持的最小次版本号。
+        pub const MIN_SUPPORTED_MINOR: u32 = 0;
+        /// 客户端支持的最小补丁版本号。
+        /// v2.0.0 / v2.0.1 已知存在兼容性问题，最低要求 v2.0.2。
+        pub const MIN_SUPPORTED_PATCH: u32 = 2;
         /// GitHub 仓库名（owner/repo），用于 releases API。
         pub const GITHUB_REPO: &str = "a645162/shmtu-cas-ocr-model";
         /// GitHub releases API URL。
