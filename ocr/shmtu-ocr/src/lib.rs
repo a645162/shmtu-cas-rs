@@ -26,7 +26,7 @@ pub mod const_value {
 
     /// v2 模型: 单个 MobileNetV3 Tri-Slot Decoder（默认）。
     pub mod v2 {
-        pub const DEFAULT_TAG: &str = "v2.0.4";
+        pub const DEFAULT_TAG: &str = "v2.0.5";
         pub const DEFAULT_BACKBONE: &str = "mobilenet_v3_small";
         pub const DEFAULT_PRECISION: &str = "fp16";
         pub const MODEL_FAMILY: &str = "trislot_decoder";
