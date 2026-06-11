@@ -26,7 +26,7 @@ pub mod const_value {
 
     /// v2 模型: 单个 MobileNetV3 Tri-Slot Decoder（默认）。
     pub mod v2 {
-        pub const DEFAULT_TAG: &str = "v2.0.2";
+        pub const DEFAULT_TAG: &str = "v2.0.4";
         pub const DEFAULT_BACKBONE: &str = "mobilenet_v3_small";
         pub const DEFAULT_PRECISION: &str = "fp16";
         pub const MODEL_FAMILY: &str = "trislot_decoder";
@@ -47,8 +47,8 @@ pub mod const_value {
         /// 客户端支持的最小次版本号。
         pub const MIN_SUPPORTED_MINOR: u32 = 0;
         /// 客户端支持的最小补丁版本号。
-        /// v2.0.0 / v2.0.1 已知存在兼容性问题，最低要求 v2.0.2。
-        pub const MIN_SUPPORTED_PATCH: u32 = 2;
+        /// v2.0.0 ~ v2.0.3 已删除或存在兼容性问题，最低要求 v2.0.4。
+        pub const MIN_SUPPORTED_PATCH: u32 = 4;
         /// GitHub 仓库名（owner/repo），用于 releases API。
         pub const GITHUB_REPO: &str = "a645162/shmtu-cas-ocr-model";
         /// GitHub releases API URL。

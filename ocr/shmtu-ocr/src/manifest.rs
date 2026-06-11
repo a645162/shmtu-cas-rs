@@ -23,8 +23,6 @@
 //!       }
 //!     }
 //!   ],
-//!   // 旧版平铺数组,新 manifest 也会保留,便于老 client 兼容
-//!   "artifacts": [...],
 //!   "digests": [...]
 //! }
 //! ```
@@ -32,7 +30,6 @@
 //! 本模块提供：
 //! - [`V2Manifest`]  顶层 manifest 结构
 //! - [`V2ModelEntry`] 单个模型分组条目
-//! - [`V2FlatArtifact`] 旧版平铺条目 (fallback)
 //! - [`ModelInfo`] / [`ModelMetrics`] 公共 API,供 Tauri command 序列化给前端
 //! - [`list_models_from_manifest`] 从 manifest 抽取 `ModelInfo` 列表
 //! - [`find_artifact_in_model`] 在 `V2ModelEntry` 中按 engine/precision 查找文件
@@ -49,34 +46,9 @@ pub struct V2Manifest {
     pub modellist: Vec<String>,
     #[serde(default)]
     pub models: Vec<V2ModelEntry>,
-    /// 旧版平铺数组(没有 `models` 字段时作为 fallback)。
-    #[serde(default)]
-    pub artifacts: Vec<V2FlatArtifact>,
     /// 顶层 digest 列表(可选,本模块不解析内容,仅保留兼容)。
     #[serde(default)]
     pub digests: Vec<serde_json::Value>,
-}
-
-impl V2Manifest {
-    /// 是否为新格式 (有 `models` 字段且非空)。
-    pub fn has_grouped_models(&self) -> bool {
-        !self.models.is_empty()
-    }
-}
-
-/// 旧版/平铺的 artifact 条目(`models` 字段缺失时使用)。
-#[derive(Debug, Clone, Deserialize)]
-pub struct V2FlatArtifact {
-    #[serde(default)]
-    pub version: String,
-    pub family: String,
-    pub backbone: String,
-    #[serde(default)]
-    pub engine: String,
-    pub precision: String,
-    #[serde(default)]
-    pub format: String,
-    pub files: Vec<V2ArtifactFile>,
 }
 
 /// 单个文件条目。
@@ -181,33 +153,9 @@ impl From<RawModelMetrics> for ModelMetrics {
 
 /// 从 manifest 抽取 `ModelInfo` 列表。
 ///
-/// - 优先从 `models[]` 解析;
-/// - 若 `models` 为空,尝试从平铺 `artifacts[]` 推断(每个 backbone 视为一个模型)。
+/// 仅从 `models[]` 解析；v2 manifest 必须包含 `models` 字段。
 pub fn list_models_from_manifest(manifest: &V2Manifest) -> Vec<ModelInfo> {
-    if !manifest.models.is_empty() {
-        return manifest.models.iter().map(model_entry_to_info).collect();
-    }
-
-    // Fallback: 从平铺 artifacts 推断。
-    // 同一 (family, backbone) 只保留一个 ModelInfo,artifacts 列表累积为内部表达。
-    use std::collections::BTreeMap;
-    let mut by_key: BTreeMap<(String, String), ModelInfo> = BTreeMap::new();
-    for art in &manifest.artifacts {
-        let key = (art.family.clone(), art.backbone.clone());
-        by_key
-            .entry(key)
-            .or_insert_with(|| ModelInfo {
-                asset_stem: format!("{}.{}", art.backbone, art.family),
-                display_name: art.backbone.clone(),
-                backbone: art.backbone.clone(),
-                version: art.version.clone(),
-                family: art.family.clone(),
-                model_size_m: None,
-                metrics: None,
-                supported_backbones: vec![art.backbone.clone()],
-            });
-    }
-    by_key.into_values().collect()
+    manifest.models.iter().map(model_entry_to_info).collect()
 }
 
 fn model_entry_to_info(entry: &V2ModelEntry) -> ModelInfo {
@@ -330,7 +278,6 @@ mod tests {
                     }
                 }
             }],
-            "artifacts": [],
             "digests": []
         });
         serde_json::from_value(raw).expect("sample manifest parses")
@@ -340,7 +287,6 @@ mod tests {
     fn parses_grouped_manifest() {
         let m = sample_manifest();
         assert_eq!(m.schema_version, 2);
-        assert!(m.has_grouped_models());
         assert_eq!(m.models.len(), 1);
         assert_eq!(m.models[0].backbone, "mobilenet_v3_small");
         assert_eq!(m.models[0].metrics.as_ref().unwrap().val_acc_expression, Some(0.9512));
@@ -380,32 +326,38 @@ mod tests {
     }
 
     #[test]
-    fn fallback_to_flat_artifacts() {
-        let raw = json!({
-            "schema_version": 1,
-            "artifacts": [
-                {
-                    "version": "2.0",
-                    "family": "trislot_decoder",
-                    "backbone": "mobilenet_v3_small",
-                    "engine": "onnx",
-                    "precision": "fp16",
-                    "format": "onnx",
-                    "files": [{
-                        "path": "x.onnx",
-                        "release_asset_name": "x.onnx",
-                        "sha256": "abc"
-                    }]
-                }
-            ]
-        });
-        let m: V2Manifest = serde_json::from_value(raw).unwrap();
-        assert!(!m.has_grouped_models());
+    fn parse_real_v204_manifest() {
+        let path = "/tmp/model-assets-v2.0.4.json";
+        let json = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("skipping real manifest test: {} not found", path);
+                return;
+            }
+        };
+        let m: V2Manifest = serde_json::from_str(&json).expect("parse real v2.0.4 manifest");
+        assert_eq!(m.schema_version, 2);
+        assert_eq!(m.models.len(), 4);
+        assert_eq!(m.modellist.len(), 4);
+
         let infos = list_models_from_manifest(&m);
-        assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].backbone, "mobilenet_v3_small");
-        assert_eq!(infos[0].family, "trislot_decoder");
-        assert!(infos[0].metrics.is_none());
+        assert_eq!(infos.len(), 4);
+
+        // mobilenet_v3_small
+        let first = &infos[0];
+        assert_eq!(first.backbone, "mobilenet_v3_small");
+        assert!((first.model_size_m.unwrap() - 1.48).abs() < 0.01);
+        assert!(first.metrics.as_ref().unwrap().val_acc_expression.unwrap() > 0.99);
+        assert!(first.metrics.as_ref().unwrap().test_acc_expression.unwrap() > 0.99);
+
+        // find ncnn/fp32 artifact — should have 2 files (.param + .bin)
+        let (file, _entry) = find_artifact_in_model(&m.models[0], "ncnn", "fp32").unwrap();
+        assert_eq!(file.sha256.len(), 64); // SHA256 hex
+
+        // resnet18 — last model
+        let last = &infos[3];
+        assert_eq!(last.backbone, "resnet18");
+        assert!((last.model_size_m.unwrap() - 11.71).abs() < 0.01);
     }
 
     #[test]
