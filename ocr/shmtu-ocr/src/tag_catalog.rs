@@ -5,7 +5,9 @@
 //! - 支持 GITHUB_TOKEN / GH_TOKEN 环境变量提升 API 限流阈值
 
 use crate::const_value;
+use crate::manifest::{list_models_from_manifest, ModelInfo};
 use crate::tag_resolver;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -129,4 +131,47 @@ pub async fn list_candidate_v2_tags(
         out.len()
     );
     Ok(out)
+}
+
+/// 拉取指定 tag 的 `model-assets.json` 并返回该 tag 下的模型列表。
+///
+/// - 优先 GitHub,失败 fallback Gitee。
+/// - 解析失败时返回错误(由调用方决定是否降级)。
+pub async fn list_models_for_tag(tag: &str) -> Result<Vec<ModelInfo>> {
+    let client = build_client_opt()
+        .ok_or_else(|| anyhow::anyhow!("创建 HTTP client 失败"))?;
+    let url = |mirror: &str| {
+        format!(
+            "{}/{}/{}",
+            mirror, tag, const_value::v2::MANIFEST_NAME
+        )
+    };
+    let mut last_err: Option<anyhow::Error> = None;
+    for mirror in [
+        const_value::v2::BASE_URL_GITHUB,
+        const_value::v2::BASE_URL_GITEE,
+    ] {
+        let target = url(mirror);
+        match crate::downloader::fetch_text(&client, &target).await {
+            Ok(text) => {
+                let manifest: crate::manifest::V2Manifest = serde_json::from_str(&text)
+                    .with_context(|| format!("解析 manifest 失败: {}", target))?;
+                info!(
+                    "list_models_for_tag: tag={} mirror={} 解析出 {} 个模型",
+                    tag,
+                    mirror,
+                    manifest.models.len()
+                );
+                return Ok(list_models_from_manifest(&manifest));
+            }
+            Err(e) => {
+                warn!(
+                    "list_models_for_tag: tag={} mirror={} 拉取失败: {}",
+                    tag, mirror, e
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("所有 mirror 均失败")))
 }

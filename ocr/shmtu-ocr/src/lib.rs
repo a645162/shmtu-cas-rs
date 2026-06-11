@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod downloader;
 pub mod image;
+pub mod manifest;
 pub mod tag_catalog;
 pub mod tag_resolver;
 
@@ -82,6 +83,9 @@ pub enum ModelVersion {
     #[default]
     V2,
 }
+
+// Re-export 关键 manifest 类型,便于 Tauri command 一行引入。
+pub use manifest::{ModelInfo, ModelMetrics};
 
 impl ModelVersion {
     /// 字符串表示 ("v1" / "v2")，用于配置/前端序列化。

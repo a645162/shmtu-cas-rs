@@ -3,14 +3,19 @@
 //! - v1 下载（3 模型 + SHA256SUMS）继续走 Gitee，逻辑保留在 shmtu-ocr-cli / Tauri 命令中
 //!   （`captcha::ensure_local_ocr_model_files`），避免重复实现。
 //! - v2 下载（manifest + 单模型）走 [`download_v2`] 流程：拉 manifest → 匹配条目 → 下载资产 → SHA256 校验。
+//!
+//! manifest schema 解析细节见 [`crate::manifest`] 模块。
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::const_value;
+use crate::manifest::{
+    find_artifact_in_model, find_model_by_backbone, find_model_by_stem, V2ArtifactFile,
+    V2Manifest,
+};
 
 /// 下载镜像源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,32 +40,13 @@ impl Mirror {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct V2ArtifactFile {
-    #[allow(dead_code)]
-    path: String,
-    sha256: String,
-    release_asset_name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct V2Artifact {
-    #[allow(dead_code)]
-    version: String,
-    family: String,
-    backbone: String,
-    #[allow(dead_code)]
-    engine: String,
-    precision: String,
-    #[allow(dead_code)]
-    format: String,
-    files: Vec<V2ArtifactFile>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct V2Manifest {
-    artifacts: Vec<V2Artifact>,
-}
+// 重新导出关键 manifest 类型,保持 downloader 公共 API 表面不变,
+// 旧代码 `shmtu_ocr::downloader::V2Manifest` / `V2Artifact` 仍可用。
+pub use crate::manifest::{V2ArtifactEntry, V2FlatArtifact, V2ModelEntry};
+/// 历史类型别名,旧 client 引用 `V2Artifact` 时仍能编译。
+pub type V2Artifact = V2FlatArtifact;
+/// 顶层 manifest 类型 (从 `crate::manifest` 转发)。
+pub type V2ManifestRef = V2Manifest;
 
 /// v2 下载选项。
 #[derive(Debug, Clone)]
@@ -71,10 +57,34 @@ pub struct V2DownloadOptions {
     pub tag: Option<String>,
     pub backbone: String,
     pub precision: String,
+    /// 可选:直接按 `asset_stem` 选择模型(优先级高于 `backbone`/`precision`)。
+    /// 例如 `"mobilenet_v3_small.trislot_decoder.v2_0"`。
+    /// 为 `None` 时按 (backbone, precision) 在分组 manifest 中查找;若 manifest
+    /// 没有 `models` 字段则回退到旧平铺 `artifacts` 匹配。
+    pub asset_stem: Option<String>,
+    /// 引擎筛选(默认 `"onnx"`),仅在平铺 artifact 匹配时使用。
+    #[allow(dead_code)]
+    pub engine: String,
     pub mirror: Mirror,
     pub dest: PathBuf,
     /// 可选 SHA256 校验期望值（若为 None 则从 manifest 读）。
     pub expected_sha256: Option<String>,
+}
+
+impl Default for V2DownloadOptions {
+    /// 占位 `Default`(使用空 dest);具体业务请使用 `with_defaults` / `with_tag`。
+    fn default() -> Self {
+        Self {
+            tag: None,
+            backbone: const_value::v2::DEFAULT_BACKBONE.to_string(),
+            precision: const_value::v2::DEFAULT_PRECISION.to_string(),
+            asset_stem: None,
+            engine: "onnx".to_string(),
+            mirror: Mirror::Github,
+            dest: PathBuf::new(),
+            expected_sha256: None,
+        }
+    }
 }
 
 impl V2DownloadOptions {
@@ -86,6 +96,8 @@ impl V2DownloadOptions {
             tag: None,
             backbone: const_value::v2::DEFAULT_BACKBONE.to_string(),
             precision: const_value::v2::DEFAULT_PRECISION.to_string(),
+            asset_stem: None,
+            engine: "onnx".to_string(),
             mirror: Mirror::Github,
             dest: dest.as_ref().to_path_buf(),
             expected_sha256: None,
@@ -96,6 +108,16 @@ impl V2DownloadOptions {
     pub fn with_tag(dest: impl AsRef<Path>, tag: impl Into<String>) -> Self {
         let mut opts = Self::with_defaults(dest);
         opts.tag = Some(tag.into());
+        opts
+    }
+
+    /// 显式指定 asset_stem 的便捷构造(使用默认 backbone 拼接得到)。
+    pub fn with_asset_stem(
+        dest: impl AsRef<Path>,
+        asset_stem: impl Into<String>,
+    ) -> Self {
+        let mut opts = Self::with_defaults(dest);
+        opts.asset_stem = Some(asset_stem.into());
         opts
     }
 
@@ -214,16 +236,67 @@ async fn fetch_manifest(
     Ok((manifest, url))
 }
 
-fn find_artifact<'a>(
-    manifest: &'a V2Manifest,
+/// 在 manifest 中按 `opts` 解析目标文件。返回 `(release_asset_name, sha256)`。
+///
+/// 优先级：
+/// 1. 若 `opts.asset_stem` 指定,优先按 asset_stem 在 `models[]` 中查找;
+/// 2. 否则按 (family, backbone) 在 `models[]` 中查找,命中后用 (engine, precision) 取 artifact;
+/// 3. 若 `models` 为空,回退到平铺 `artifacts` 列表,匹配 (family, backbone, engine, precision)。
+fn resolve_artifact_target(
+    manifest: &V2Manifest,
+    opts: &V2DownloadOptions,
+) -> Result<V2ArtifactFile> {
+    if !manifest.models.is_empty() {
+        // 1) asset_stem 优先
+        if let Some(stem) = opts.asset_stem.as_deref() {
+            if let Some(model) = find_model_by_stem(manifest, stem) {
+                let (file, _) =
+                    find_artifact_in_model(model, "onnx", &opts.precision)?;
+                return Ok(file);
+            }
+            bail!("manifest 中找不到 asset_stem={} 的模型", stem);
+        }
+        // 2) family + backbone + precision
+        if let Some(model) =
+            find_model_by_backbone(manifest, const_value::v2::MODEL_FAMILY, &opts.backbone)
+        {
+            let (file, _) = find_artifact_in_model(model, "onnx", &opts.precision)?;
+            return Ok(file);
+        }
+        bail!(
+            "manifest 中找不到匹配条目: family={}, backbone={}, precision={}",
+            const_value::v2::MODEL_FAMILY,
+            opts.backbone,
+            opts.precision
+        );
+    }
+
+    // 3) 平铺回退
+    find_flat_artifact(manifest, &opts.backbone, &opts.precision).ok_or_else(|| {
+        anyhow!(
+            "manifest 中找不到匹配条目(平铺): family={}, backbone={}, precision={}",
+            const_value::v2::MODEL_FAMILY,
+            opts.backbone,
+            opts.precision
+        )
+    })
+}
+
+/// 旧版平铺匹配,保持 `find_artifact` 行为兼容(已弃用语义,内部使用)。
+fn find_flat_artifact(
+    manifest: &V2Manifest,
     backbone: &str,
     precision: &str,
-) -> Option<&'a V2Artifact> {
-    manifest.artifacts.iter().find(|a| {
-        a.family == const_value::v2::MODEL_FAMILY
-            && a.backbone == backbone
-            && a.precision == precision
-    })
+) -> Option<V2ArtifactFile> {
+    manifest
+        .artifacts
+        .iter()
+        .find(|a| {
+            a.family == const_value::v2::MODEL_FAMILY
+                && a.backbone == backbone
+                && a.precision == precision
+        })
+        .and_then(|a| a.files.first().cloned())
 }
 
 /// 完整 v2 下载流程：
@@ -233,6 +306,8 @@ fn find_artifact<'a>(
 /// 4) SHA256 校验
 ///
 /// 注意：传进来的 opts.dest 是目录。模型写入 `dest/{release_asset_name}`。
+///
+/// `opts.asset_stem` 可选,设置时按 asset_stem 直接挑选模型(忽略 backbone 匹配)。
 pub async fn download_v2(opts: &V2DownloadOptions) -> Result<PathBuf> {
     let client = reqwest::Client::new();
     tokio::fs::create_dir_all(&opts.dest)
@@ -266,17 +341,7 @@ pub async fn download_v2(opts: &V2DownloadOptions) -> Result<PathBuf> {
         }
     };
 
-    let artifact = find_artifact(&manifest, &opts.backbone, &opts.precision)
-        .ok_or_else(|| anyhow!(
-            "manifest 中找不到匹配条目: family=trislot_decoder, backbone={}, precision={}",
-            opts.backbone,
-            opts.precision
-        ))?;
-
-    let file = artifact
-        .files
-        .first()
-        .ok_or_else(|| anyhow!("manifest 条目无 files: {:?}", artifact))?;
+    let file = resolve_artifact_target(&manifest, opts)?;
 
     let dest = opts.dest.join(&file.release_asset_name);
 
