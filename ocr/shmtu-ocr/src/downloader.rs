@@ -33,10 +33,9 @@ impl Mirror {
         }
     }
 
-    /// 按优先级尝试: Github 优先（与 v1 行为不同，v2 走 GitHub 即可，
-    /// Gitee 仅作 fallback）。
+    /// 按优先级尝试: Gitee 优先（国内用户访问更稳定，GitHub 作为 fallback）。
     pub fn preferred_order() -> &'static [Mirror] {
-        &[Mirror::Github, Mirror::Gitee]
+        &[Mirror::Gitee, Mirror::Github]
     }
 }
 
@@ -73,7 +72,7 @@ impl Default for V2DownloadOptions {
             backbone: const_value::v2::DEFAULT_BACKBONE.to_string(),
             precision: const_value::v2::DEFAULT_PRECISION.to_string(),
             asset_stem: None,
-            mirror: Mirror::Github,
+            mirror: Mirror::Gitee,
             dest: PathBuf::new(),
             expected_sha256: None,
         }
@@ -81,7 +80,7 @@ impl Default for V2DownloadOptions {
 }
 
 impl V2DownloadOptions {
-    /// 基于 const_value::v2 默认值的便捷构造（默认走 Github, 可自动 fallback）。
+    /// 基于 const_value::v2 默认值的便捷构造（默认走 Gitee, 可自动 fallback）。
     ///
     /// `tag` 传 `None` 以启用自动解析，传 `Some("v2.0.2")` 锁定指定版本。
     pub fn with_defaults(dest: impl AsRef<Path>) -> Self {
@@ -90,7 +89,7 @@ impl V2DownloadOptions {
             backbone: const_value::v2::DEFAULT_BACKBONE.to_string(),
             precision: const_value::v2::DEFAULT_PRECISION.to_string(),
             asset_stem: None,
-            mirror: Mirror::Github,
+            mirror: Mirror::Gitee,
             dest: dest.as_ref().to_path_buf(),
             expected_sha256: None,
         }

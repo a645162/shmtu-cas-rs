@@ -94,15 +94,16 @@ struct GhRelease {
     prerelease: bool,
 }
 
-/// 从 GitHub releases API 自动解析最新可用 tag。
+/// 从 releases API 自动解析最新可用 tag（Gitee 优先，失败 fallback GitHub）。
 ///
 /// 行为：
-/// 1. `GET {GITHUB_RELEASES_API}?per_page=100` 拉取 release 列表
-/// 2. 过滤 `draft == false && prerelease == false`
-/// 3. 解析 `v{major}.{minor}.{patch}`，保留 `major == max_major && (max_minor == u32::MAX || minor <= max_minor)`
-/// 4. 过滤掉低于最小版本 `(min_major, min_minor, min_patch)` 的 tag
-/// 5. 按 (major, minor, patch) 降序排序，取首个
-/// 6. 任何错误（网络/JSON/无匹配）→ 返回 `fallback`，打 `tracing::warn!`
+/// 1. 先尝试 Gitee releases API，失败则 fallback 到 GitHub releases API
+/// 2. `GET {API}?per_page=100` 拉取 release 列表
+/// 3. 过滤 `draft == false && prerelease == false`
+/// 4. 解析 `v{major}.{minor}.{patch}`，保留 `major == max_major && (max_minor == u32::MAX || minor <= max_minor)`
+/// 5. 过滤掉低于最小版本 `(min_major, min_minor, min_patch)` 的 tag
+/// 6. 按 (major, minor, patch) 降序排序，取首个
+/// 7. 任何错误（网络/JSON/无匹配）→ 返回 `fallback`，打 `tracing::warn!`
 ///
 /// 注意：传入的 `max_major` / `max_minor` 是客户端的"已知兼容"上限，
 /// 即 `crate::const_value::v2::MAX_SUPPORTED_MAJOR` / `MAX_SUPPORTED_MINOR`。
@@ -115,30 +116,40 @@ pub async fn resolve_latest_tag(
     let min_major = const_value::v2::MIN_SUPPORTED_MAJOR;
     let min_minor = const_value::v2::MIN_SUPPORTED_MINOR;
     let min_patch = const_value::v2::MIN_SUPPORTED_PATCH;
-    let url = const_value::v2::GITHUB_RELEASES_API;
     let filter_desc = if max_minor == UNBOUNDED_MINOR {
         format!("v{}.x.x", max_major)
     } else {
         format!("v{}.{}.x", max_major, max_minor)
     };
-    info!(
-        "resolve_latest_tag: 开始解析, URL={}, 范围={}",
-        url, filter_desc
-    );
-    match fetch_and_pick(url, max_major, max_minor, min_major, min_minor, min_patch).await {
-        Some(tag) => {
-            info!("自动解析 v2 最新 tag: {} (范围 {})", tag, filter_desc);
-            tag
+
+    // Gitee 优先，GitHub fallback
+    let api_urls = [
+        const_value::v2::GITEE_RELEASES_API,
+        const_value::v2::GITHUB_RELEASES_API,
+    ];
+
+    for api_url in &api_urls {
+        let source_name = if api_url.contains("gitee.com") { "Gitee" } else { "GitHub" };
+        info!(
+            "resolve_latest_tag: 尝试 {} API, URL={}, 范围={}",
+            source_name, api_url, filter_desc
+        );
+        if let Some(tag) = fetch_and_pick(api_url, max_major, max_minor, min_major, min_minor, min_patch).await {
+            info!("自动解析 v2 最新 tag: {} (来源={}, 范围 {})", tag, source_name, filter_desc);
+            return tag;
         }
-        None => {
-            warn!(
-                "无法从 GitHub releases 解析最新 v2 tag (范围 {}), URL={}, fallback -> {}. \
-                 如果反复出现此告警，请设置 GITHUB_TOKEN 环境变量提升 API 限流阈值 (未鉴权 60 req/h/IP).",
-                filter_desc, url, fallback
-            );
-            fallback.to_string()
-        }
+        warn!(
+            "无法从 {} releases 解析最新 v2 tag (范围 {}), URL={}, 尝试下一个源",
+            source_name, filter_desc, api_url
+        );
     }
+
+    warn!(
+        "所有源均无法解析最新 v2 tag (范围 {}), fallback -> {}. \
+         如果反复出现此告警，请设置 GITHUB_TOKEN 环境变量提升 API 限流阈值 (未鉴权 60 req/h/IP).",
+        filter_desc, fallback
+    );
+    fallback.to_string()
 }
 
 async fn fetch_and_pick(

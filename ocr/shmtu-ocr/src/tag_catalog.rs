@@ -61,7 +61,7 @@ pub struct TagInfo {
     pub prerelease: bool,
 }
 
-/// 从 GitHub releases API 拉取 v2 候选 tag 列表。
+/// 从 releases API 拉取 v2 候选 tag 列表（Gitee 优先，失败 fallback GitHub）。
 /// - `max_major`: 主版本号锁 (当前 2)
 /// - `max_minor`: 次版本号锁, `u32::MAX` 时不限
 /// - 返回按 API 默认顺序 (最新在前) 的列表 (最多 100 条)
@@ -70,67 +70,105 @@ pub async fn list_candidate_v2_tags(
     max_major: u32,
     max_minor: u32,
 ) -> anyhow::Result<Vec<TagInfo>> {
-    let api_url = const_value::v2::GITHUB_RELEASES_API;
-    info!(
-        "list_candidate_v2_tags: 开始拉取, URL={}, max_major={}, max_minor={}",
-        api_url, max_major, max_minor
-    );
-
-    let client = build_client_opt()
-        .ok_or_else(|| anyhow::anyhow!("创建 HTTP client 失败"))?;
-    let url = format!("{}?per_page=100", api_url);
-    info!("list_candidate_v2_tags: GET {}", url);
-    let resp = client.get(&url).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        warn!(
-            "list_candidate_v2_tags: GitHub API 返回 HTTP {} for {}. \
-             未鉴权限流 60 req/h (共享 IP 共用此配额). 设置 GITHUB_TOKEN 可提升至 5000 req/h.",
-            status, url
-        );
-        anyhow::bail!(
-            "HTTP {} for {}. 提示: 设置 GITHUB_TOKEN 环境变量可提升 API 限流 (未鉴权 60 req/h/IP)",
-            status, url
-        );
-    }
-    let releases: Vec<GhRelease> = resp.json().await?;
-    info!(
-        "list_candidate_v2_tags: 收到 {} 个 release",
-        releases.len()
-    );
     let min_major = const_value::v2::MIN_SUPPORTED_MAJOR;
     let min_minor = const_value::v2::MIN_SUPPORTED_MINOR;
     let min_patch = const_value::v2::MIN_SUPPORTED_PATCH;
-    let mut out = Vec::new();
-    for r in releases {
-        if r.draft {
-            continue;
-        }
-        let (mj, mn, pat) = match tag_resolver::parse_semver_tag(&r.tag_name) {
-            Some(t) => t,
-            None => continue,
+
+    let client = build_client_opt()
+        .ok_or_else(|| anyhow::anyhow!("创建 HTTP client 失败"))?;
+
+    // Gitee 优先，GitHub fallback
+    let api_urls = [
+        const_value::v2::GITEE_RELEASES_API,
+        const_value::v2::GITHUB_RELEASES_API,
+    ];
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for api_url in &api_urls {
+        let source_name = if api_url.contains("gitee.com") { "Gitee" } else { "GitHub" };
+        let url = format!("{}?per_page=100", api_url);
+        info!(
+            "list_candidate_v2_tags: 尝试 {} API, URL={}, max_major={}, max_minor={}",
+            source_name, url, max_major, max_minor
+        );
+        let resp = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "list_candidate_v2_tags: {} API 请求失败: {}",
+                    source_name, e
+                );
+                last_err = Some(anyhow::anyhow!("HTTP 请求失败: {}", e));
+                continue;
+            }
         };
-        if mj != max_major {
+        if !resp.status().is_success() {
+            let status = resp.status();
+            warn!(
+                "list_candidate_v2_tags: {} API 返回 HTTP {} for {}. \
+                 未鉴权限流 60 req/h (共享 IP 共用此配额). 设置 GITHUB_TOKEN 可提升至 5000 req/h.",
+                source_name, status, url
+            );
+            last_err = Some(anyhow::anyhow!(
+                "HTTP {} for {}. 提示: 设置 GITHUB_TOKEN 环境变量可提升 API 限流 (未鉴权 60 req/h/IP)",
+                status, url
+            ));
             continue;
         }
-        if max_minor != UNBOUNDED_MINOR && mn > max_minor {
-            continue;
+        let releases: Vec<GhRelease> = match resp.json().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    "list_candidate_v2_tags: {} API JSON 解析失败: {}",
+                    source_name, e
+                );
+                last_err = Some(anyhow::anyhow!("JSON 解析失败: {}", e));
+                continue;
+            }
+        };
+        info!(
+            "list_candidate_v2_tags: {} API 收到 {} 个 release",
+            source_name,
+            releases.len()
+        );
+        let mut out = Vec::new();
+        for r in releases {
+            if r.draft {
+                continue;
+            }
+            let (mj, mn, pat) = match tag_resolver::parse_semver_tag(&r.tag_name) {
+                Some(t) => t,
+                None => continue,
+            };
+            if mj != max_major {
+                continue;
+            }
+            if max_minor != UNBOUNDED_MINOR && mn > max_minor {
+                continue;
+            }
+            // 过滤低于最小版本的 tag
+            if (mj, mn, pat) < (min_major, min_minor, min_patch) {
+                continue;
+            }
+            out.push(TagInfo {
+                tag: r.tag_name,
+                published_at: r.published_at,
+                prerelease: r.prerelease,
+            });
         }
-        // 过滤低于最小版本的 tag
-        if (mj, mn, pat) < (min_major, min_minor, min_patch) {
-            continue;
-        }
-        out.push(TagInfo {
-            tag: r.tag_name,
-            published_at: r.published_at,
-            prerelease: r.prerelease,
-        });
+        info!(
+            "list_candidate_v2_tags: {} API 过滤后 {} 个候选 tag",
+            source_name,
+            out.len()
+        );
+        return Ok(out);
     }
-    info!(
-        "list_candidate_v2_tags: 过滤后 {} 个候选 tag",
-        out.len()
-    );
-    Ok(out)
+
+    // 所有源均失败
+    if let Some(e) = last_err {
+        return Err(e);
+    }
+    anyhow::bail!("所有源均失败")
 }
 
 /// 拉取指定 tag 的 `model-assets.json` 并返回该 tag 下的模型列表。
@@ -148,8 +186,8 @@ pub async fn list_models_for_tag(tag: &str) -> Result<Vec<ModelInfo>> {
     };
     let mut last_err: Option<anyhow::Error> = None;
     for mirror in [
-        const_value::v2::BASE_URL_GITHUB,
         const_value::v2::BASE_URL_GITEE,
+        const_value::v2::BASE_URL_GITHUB,
     ] {
         let target = url(mirror);
         match crate::downloader::fetch_text(&client, &target).await {

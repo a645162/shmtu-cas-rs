@@ -54,6 +54,9 @@ pub mod const_value {
         /// GitHub releases API URL。
         pub const GITHUB_RELEASES_API: &str =
             "https://api.github.com/repos/a645162/shmtu-cas-ocr-model/releases";
+        /// Gitee releases API URL。
+        pub const GITEE_RELEASES_API: &str =
+            "https://gitee.com/api/v5/repos/a645162/shmtu-cas-ocr-model/releases";
 
         /// 拼出模型文件名: `{backbone}.trislot_decoder.v2_0.{precision}.onnx`
         pub fn build_model_name(backbone: &str, precision: &str) -> String {
